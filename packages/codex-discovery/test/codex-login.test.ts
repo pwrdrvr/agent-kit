@@ -191,48 +191,34 @@ exit 0
   it("resolves via the URL-surface timeout when login never prints a URL", async () => {
     const binDir = makeTempDir();
     const codexHome = makeTempDir();
+    // Inject a tiny URL-surface timeout so the path is exercised deterministically
+    // and fast (the default is 8s, which would exceed vitest's 5s test timeout).
+    const manager = new CodexLoginManager({ loginUrlTimeoutMs: 100 });
     try {
-      // Print nothing useful, stay alive briefly. Use a short fake timeout by
-      // monkeypatching is overkill — instead rely on a shim that prints no URL
-      // and exits, exercising the close→status path. To keep the test fast we
-      // use a shim that exits immediately with no URL and is NOT logged in,
-      // which makes startProfileLogin reject. So instead test the timeout path
-      // with a sleeper that prints no URL; we shorten by killing it ourselves.
+      // A shim that emits no OAuth URL and stays alive past the timeout.
       const noUrl = path.join(binDir, "codex");
       writeFileSync(
         noUrl,
         `#!/bin/sh
-if [ "$1" = "login" ] && [ "$2" = "status" ]; then
-  exit 0
-fi
-if [ "$1" = "login" ]; then
-  echo "working..."
-  sleep 30
-  exit 0
-fi
-exit 0
+echo "working..."
+sleep 30
 `,
         "utf8",
       );
       chmodSync(noUrl, 0o755);
 
-      const manager = new CodexLoginManager();
-      // Don't await the full 8s timeout in CI: start the login, then assert it
-      // is tracked and killable. We resolve the timeout race by disposing.
-      const pending = manager.startProfileLogin({
+      const result = await manager.startProfileLogin({
         command: noUrl,
         codexHome,
         profile: "p",
       });
-      // The child should be spawned and tracked synchronously-ish; give it a tick.
-      await new Promise((r) => setTimeout(r, 100));
-      manager.dispose();
-      // After dispose kills the child with no URL surfaced, the close handler
-      // runs `login status` which the shim returns 0 for → authenticated.
-      const result = await pending;
+      // No URL ever surfaced → resolves started:true via the timeout, no loginUrl.
+      expect(result.started).toBe(true);
+      expect(result.loginUrl).toBeUndefined();
       expect(result.profile).toBe("p");
       expect(result.codexHome).toBe(codexHome);
     } finally {
+      manager.dispose(); // kill the lingering sleeper child
       rmSync(binDir, { recursive: true, force: true });
       rmSync(codexHome, { recursive: true, force: true });
     }

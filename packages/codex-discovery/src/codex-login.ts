@@ -104,6 +104,9 @@ export type CodexLoginManagerOptions = {
    *  Electron `shell.openExternal`). Defaults to a no-op so the flow never
    *  imports Electron and stays testable. */
   openExternal?: OpenExternal;
+  /** How long to wait for the login prompt's OAuth URL before resolving with
+   *  `started: true` anyway. Defaults to 8s; tests set it small. */
+  loginUrlTimeoutMs?: number;
 };
 
 export type StartCodexLoginParams = {
@@ -120,11 +123,13 @@ export type StartCodexLoginParams = {
 export class CodexLoginManager {
   private readonly logger: Logger;
   private readonly openExternal: OpenExternal;
+  private readonly loginUrlTimeoutMs: number;
   private readonly activeLoginProcesses = new Map<string, ChildProcess>();
 
   constructor(options: CodexLoginManagerOptions = {}) {
     this.logger = options.logger ?? noopLogger;
     this.openExternal = options.openExternal ?? (async () => {});
+    this.loginUrlTimeoutMs = options.loginUrlTimeoutMs ?? LOGIN_URL_TIMEOUT_MS;
   }
 
   /**
@@ -166,7 +171,7 @@ export class CodexLoginManager {
           ...prompt,
           ...(output.trim() ? { detail: output.trim() } : {}),
         });
-      }, LOGIN_URL_TIMEOUT_MS);
+      }, this.loginUrlTimeoutMs);
 
       const maybeResolve = (): void => {
         if (settled) return;
@@ -266,6 +271,9 @@ export function startCodexProfileLoginProcess(
     ?? new CodexLoginManager({
       ...(options?.logger ? { logger: options.logger } : {}),
       ...(options?.openExternal ? { openExternal: options.openExternal } : {}),
+      ...(options?.loginUrlTimeoutMs !== undefined
+        ? { loginUrlTimeoutMs: options.loginUrlTimeoutMs }
+        : {}),
     });
   return manager.startProfileLogin(params);
 }
