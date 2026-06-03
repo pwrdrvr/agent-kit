@@ -8,8 +8,12 @@
 //
 // `defineTool` is an identity helper: it preserves each call site's `TArgs`
 // inference (the `argsSchema`'s inferred type flows into the `dispatch` body)
-// so no one writes `any`. The catalog is then a homogeneous `ToolSpec<unknown>[]`
-// that the generator + dispatcher treat uniformly.
+// so the host never writes `any`. At the catalog boundary the type parameter is
+// erased to `AnyToolSpec` (see below): a catalog mixes tools with different
+// `TArgs`, and `ToolSpec<TArgs>` is contravariant in `TArgs` via `dispatch`, so
+// `ToolSpec<{a:number}>` is NOT assignable to `ToolSpec<unknown>`. Erasing to
+// `any` at the boundary is sound because `dispatchToolCall` zod-validates the
+// arguments at runtime before the typed `dispatch` body ever sees them.
 
 import { z } from "zod";
 import type {
@@ -70,11 +74,20 @@ export function defineTool<TArgs>(spec: ToolSpec<TArgs>): ToolSpec<TArgs> {
 }
 
 /**
+ * A `ToolSpec` with its argument type erased — the shape a heterogeneous catalog
+ * holds. `defineTool(...)`'s typed result is assignable to this, so a host writes
+ * `[defineTool(a), defineTool(b)]` and passes it straight to `buildToolCatalog` /
+ * `dispatchToolCall`. Args are validated at runtime, so the erasure is safe.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type AnyToolSpec = ToolSpec<any>;
+
+/**
  * Convert a `ToolSpec` into the protocol `DynamicToolSpec` registered with Codex
  * at `thread/start`. The `inputSchema` is derived from the tool's zod
  * `argsSchema` via zod v4's `z.toJSONSchema()` (JSON Schema draft 2020-12).
  */
-export function toDynamicToolSpec(spec: ToolSpec<unknown>): DynamicToolSpec {
+export function toDynamicToolSpec(spec: AnyToolSpec): DynamicToolSpec {
   return {
     namespace: spec.namespace,
     name: spec.name,

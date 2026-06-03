@@ -18,14 +18,14 @@ import type {
   DynamicToolCallResponse,
   DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
-import type { ToolSpec } from "./define-tool";
+import type { AnyToolSpec } from "./define-tool";
 import { toDynamicToolSpec } from "./define-tool";
 
 /**
  * Build the `DynamicToolSpec[]` registered with Codex at `thread/start`. Pure
  * projection of the catalog — an empty catalog yields an empty spec list.
  */
-export function buildToolCatalog(catalog: ReadonlyArray<ToolSpec<unknown>>): DynamicToolSpec[] {
+export function buildToolCatalog(catalog: ReadonlyArray<AnyToolSpec>): DynamicToolSpec[] {
   return catalog.map(toDynamicToolSpec);
 }
 
@@ -36,7 +36,7 @@ export function buildToolCatalog(catalog: ReadonlyArray<ToolSpec<unknown>>): Dyn
  */
 export async function dispatchToolCall(
   params: DynamicToolCallParams,
-  catalog: ReadonlyArray<ToolSpec<unknown>>
+  catalog: ReadonlyArray<AnyToolSpec>
 ): Promise<DynamicToolCallResponse> {
   const entry = catalog.find((tool) => tool.name === params.tool);
   if (entry === undefined) {
@@ -54,7 +54,7 @@ export async function dispatchToolCall(
     return errorResponse(`Invalid arguments for "${params.tool}": ${formatZodError(parsed.error)}`);
   }
 
-  let result: Awaited<ReturnType<ToolSpec<unknown>["dispatch"]>>;
+  let result: Awaited<ReturnType<AnyToolSpec["dispatch"]>>;
   try {
     result = await entry.dispatch(parsed.data, { threadId: params.threadId });
   } catch (cause) {
