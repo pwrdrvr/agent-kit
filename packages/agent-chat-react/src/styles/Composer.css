@@ -1,0 +1,121 @@
+/* Composer — the message-input row. Token-based (tokens.css). Class prefix
+   `ac-composer`. An auto-growing textarea (height driven by JS, capped at
+   ~40vh) paired with a send / interrupt button pinned right. */
+
+.ac-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ac-composer__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.ac-composer__row:focus-within {
+  border-color: var(--accent-border);
+}
+
+.ac-composer__input {
+  flex: 1;
+  min-width: 0;
+  /* Auto-grow ceiling enforced in JS (40vh); height set inline. min-height
+     keeps an empty composer at a single comfortable line. */
+  min-height: calc(var(--fs-body-lg) * var(--lh-normal));
+  max-height: 40vh;
+  resize: none;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: 400 var(--fs-body-lg)/var(--lh-normal) var(--font-sans);
+  padding: 0;
+  overflow-y: hidden;
+}
+.ac-composer__input::placeholder {
+  color: var(--text-muted);
+}
+.ac-composer__input:disabled {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+/* Send button — paper-plane on the right. */
+.ac-composer__send,
+.ac-composer__interrupt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  padding: 0;
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out);
+}
+
+.ac-composer__send {
+  background: var(--accent);
+  color: var(--button-text-on-accent);
+}
+.ac-composer__send:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+.ac-composer__send:focus-visible,
+.ac-composer__interrupt:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ac-composer__send:disabled {
+  background: var(--bg-panel-elevated);
+  border-color: var(--border-default);
+  color: var(--text-subtle);
+  cursor: not-allowed;
+}
+.ac-composer__send svg,
+.ac-composer__interrupt svg {
+  display: block;
+}
+
+/* Interrupt (stop) button — neutral chrome, danger on hover. */
+.ac-composer__interrupt {
+  background: var(--bg-panel-elevated);
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+.ac-composer__interrupt:hover {
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
+/* Sending spinner. */
+.ac-composer__spinner {
+  animation: ac-composer-spin 0.7s linear infinite;
+}
+@keyframes ac-composer-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ac-composer__spinner {
+    animation: none;
+  }
+}
