@@ -1,0 +1,41 @@
+{
+  "name": "@pwrdrvr/agent-core",
+  "version": "0.1.0",
+  "description": "Neutral message/thread/tool-call schema and injected interfaces for @pwrdrvr/agent-kit backends.",
+  "license": "MIT",
+  "author": "PwrDrvr LLC",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pwrdrvr/agent-kit.git",
+    "directory": "packages/agent-core"
+  },
+  "keywords": [
+    "agent",
+    "codex",
+    "acp",
+    "schema",
+    "chat",
+    "tool-call"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
