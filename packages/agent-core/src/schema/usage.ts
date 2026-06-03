@@ -8,6 +8,10 @@ export type NormalizedTokenUsage = {
   outputTokens?: number;
   reasoningOutputTokens?: number;
   totalTokens?: number;
+  /** The model's context window size, when the backend reports it (Codex
+   *  `ThreadTokenUsage.modelContextWindow`). Hosts persist this for "how full
+   *  is the context" UI / accounting. */
+  contextWindow?: number;
 };
 
 export const EMPTY_TOKEN_USAGE: NormalizedTokenUsage = {};

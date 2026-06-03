@@ -206,7 +206,8 @@ describe("normalizeNotification", () => {
           cachedInputTokens: 5,
           outputTokens: 20,
           reasoningOutputTokens: 2,
-          totalTokens: 50
+          totalTokens: 50,
+          contextWindow: 200000
         }
       },
       {

@@ -82,7 +82,9 @@ export function normalizeTokenUsage(usage: ThreadTokenUsage): NormalizedTokenUsa
     cachedInputTokens: last.cachedInputTokens,
     outputTokens: last.outputTokens,
     reasoningOutputTokens: last.reasoningOutputTokens,
-    totalTokens: last.totalTokens
+    totalTokens: last.totalTokens,
+    // Top-level on ThreadTokenUsage (sibling to last/total), not on the breakdown.
+    ...(usage.modelContextWindow != null ? { contextWindow: usage.modelContextWindow } : {})
   };
 }
 
