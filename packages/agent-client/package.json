@@ -1,0 +1,51 @@
+{
+  "name": "@pwrdrvr/agent-client",
+  "version": "0.1.0",
+  "description": "Codex App Server adapter for agent-kit: long-lived multi-turn thread client, one-shot structured-output client, and a surface-agnostic chat controller, all normalizing into the agent-core neutral schema.",
+  "license": "MIT",
+  "author": "PwrDrvr LLC",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pwrdrvr/agent-core": "workspace:^",
+    "@pwrdrvr/agent-transport": "workspace:^",
+    "@pwrdrvr/codex-discovery": "workspace:^",
+    "@pwrdrvr/codex-app-server-protocol": "^0.133.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pwrdrvr/agent-kit.git",
+    "directory": "packages/agent-client"
+  },
+  "keywords": [
+    "codex",
+    "app-server",
+    "agent",
+    "chat",
+    "client",
+    "adapter"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

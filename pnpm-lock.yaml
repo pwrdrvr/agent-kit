@@ -21,6 +21,28 @@ importers:
         specifier: ^3.0.0
         version: 3.2.4(@types/node@24.12.4)
 
+  packages/agent-client:
+    dependencies:
+      '@pwrdrvr/agent-core':
+        specifier: workspace:^
+        version: link:../agent-core
+      '@pwrdrvr/agent-transport':
+        specifier: workspace:^
+        version: link:../agent-transport
+      '@pwrdrvr/codex-app-server-protocol':
+        specifier: ^0.133.0
+        version: 0.133.0
+      '@pwrdrvr/codex-discovery':
+        specifier: workspace:^
+        version: link:../codex-discovery
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.12.4
+
   packages/agent-core: {}
 
   packages/agent-transport:
@@ -299,6 +321,10 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
+
+  '@pwrdrvr/codex-app-server-protocol@0.133.0':
+    resolution: {integrity: sha512-mt+geA0RZEz5A3kEK8poDE3wYDrteWGb2syfXS4/kzzgWEe26DUbQlbdQyFYoa7Zs/Z6L64gNGIfFHgemfzj8g==}
+    engines: {node: '>=20'}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
     resolution: {integrity: sha512-F5QXMSiFebS9hKZj02XhWLLnRpJ3B3AROP0tWbFBSj+6kCbg5m9j5JoHKd4mmSVy5mS/IMQloYgYxCuJC0fxEQ==}
@@ -1117,6 +1143,9 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@babel/runtime@7.29.7': {}
@@ -1390,6 +1419,8 @@ snapshots:
     dependencies:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
+
+  '@pwrdrvr/codex-app-server-protocol@0.133.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
     optional: true
@@ -2108,3 +2139,5 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  zod@4.4.3: {}
