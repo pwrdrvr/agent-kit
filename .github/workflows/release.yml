@@ -1,0 +1,55 @@
+name: Release
+
+# Changesets-driven release. On push to main:
+#   - if changesets are present, opens/updates a "Version Packages" PR;
+#   - when that PR merges (versions bumped, changesets consumed), publishes
+#     the changed packages to npm via OIDC trusted publishing (tokenless).
+#
+# Each package needs a one-time bootstrap publish + trusted-publisher config on
+# npmjs.com pinned to this workflow + the `npm-publish` environment (same flow
+# as pwrdrvr/codex-app-server-protocol — see that repo's PUBLISHING.md).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # OIDC trusted publishing
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    env:
+      NPM_CONFIG_PROVENANCE: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+
+      - name: Ensure npm supports trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: pnpm install --frozen-lockfile --ignore-pnpmfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Create release PR or publish
+        uses: changesets/action@v1
+        with:
+          version: pnpm version-packages
+          publish: pnpm release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,31 @@
+{
+  "name": "@pwrdrvr/agent-kit-root",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Monorepo for the @pwrdrvr/agent-kit packages — a shared layer for driving local Codex/ACP agents behind a neutral schema.",
+  "license": "MIT",
+  "author": "PwrDrvr LLC",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "lint:licenses": "node scripts/check-package-license-policy.mjs",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "pnpm build && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "tsup": "^8.0.0",
+    "typescript": "^6.0.2",
+    "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}
