@@ -1,0 +1,21 @@
+{
+  "name": "minimal-consumer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Runnable end-to-end demo: discover Codex, register a host tool, run a real turn through @pwrdrvr/agent-client.",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@pwrdrvr/agent-client": "workspace:^",
+    "@pwrdrvr/agent-core": "workspace:^",
+    "@pwrdrvr/codex-discovery": "workspace:^",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.0.0"
+  }
+}
