@@ -1,0 +1,147 @@
+import { describe, expect, it } from "vitest";
+import type { NormalizedThreadEvent } from "@pwrdrvr/agent-core";
+import {
+  discoverLocalAcpAgents,
+  type LocalAcpAgentProbe
+} from "../src/discovery/acp-local-discovery";
+import { BUILT_IN_ACP_STRATEGIES } from "../src/strategies/index";
+import {
+  buildAcpBackendId,
+  defaultQuirks,
+  type AcpAgentStrategy
+} from "../src/strategies/strategy-types";
+import { AcpSessionNormalizer } from "../src/normalizer/acp-normalizer";
+import { AcpAgentClient } from "../src/acp-client";
+import { FakeAcpAgentTransport } from "./fake-acp-agent";
+
+/** A probe that succeeds only for the listed (command, helpText) pairs. */
+function scriptedProbe(
+  installed: Record<string, { version: string; help: string }>
+): LocalAcpAgentProbe {
+  return async (command, args) => {
+    const entry = installed[command];
+    if (!entry) {
+      throw new Error(`command not found: ${command}`);
+    }
+    if (args.includes("--version")) {
+      return { stdout: entry.version };
+    }
+    return { stdout: entry.help };
+  };
+}
+
+describe("discoverLocalAcpAgents — strategy-driven", () => {
+  it("discovers exactly the installed agents (Gemini + Grok)", async () => {
+    const probe = scriptedProbe({
+      gemini: { version: "0.4.1", help: "usage\n  --acp  run as ACP server" },
+      grok: { version: "1.2.0", help: "Run the agent over stdio" }
+    });
+    const agents = await discoverLocalAcpAgents({ probe, now: () => 42 });
+    expect(agents.map((a) => a.strategyId).sort()).toEqual(["gemini", "grok"]);
+    const gemini = agents.find((a) => a.strategyId === "gemini")!;
+    expect(gemini.command).toBe("gemini");
+    // Gemini's ensureArgs append --skip-trust + the trust env.
+    expect(gemini.args).toEqual(["--acp", "--skip-trust"]);
+    expect(gemini.env).toMatchObject({ GEMINI_CLI_TRUST_WORKSPACE: "true" });
+    expect(gemini.version).toBe("0.4.1");
+  });
+
+  it("matches a help string with the agent's ACP subcommand even amid other text", async () => {
+    const probe = scriptedProbe({
+      kimi: {
+        version: "kimi version 2.0.0",
+        help: "kimi acp — start the ACP server\nOther flags: --foo --bar"
+      }
+    });
+    const agents = await discoverLocalAcpAgents({ probe });
+    expect(agents.map((a) => a.strategyId)).toEqual(["kimi"]);
+    expect(agents[0]?.args).toEqual(["acp"]);
+  });
+
+  it("tries fallback command paths when the bare name is missing (Grok)", async () => {
+    const probe = scriptedProbe({
+      "/opt/homebrew/bin/grok": { version: "1.0.0", help: "Run the agent over stdio" }
+    });
+    const agents = await discoverLocalAcpAgents({ probe });
+    expect(agents).toHaveLength(1);
+    expect(agents[0]?.command).toBe("/opt/homebrew/bin/grok");
+  });
+});
+
+describe("strategy table extensibility (KTD-A2)", () => {
+  // A synthetic 5th strategy: a new ACP agent added as a single table entry.
+  const acmeStrategy: AcpAgentStrategy = {
+    id: "acme",
+    backendId: buildAcpBackendId("acme"),
+    displayName: "Acme Coder",
+    authors: ["Acme Inc"],
+    discoveryProbe: {
+      command: "acme",
+      versionArgs: ["--version"],
+      helpArgs: ["--help"],
+      helpMatches: /--acp-stdio/
+    },
+    spawn: { command: "acme", args: ["--acp-stdio"] },
+    quirks: defaultQuirks({ surfaceThoughts: false, titleFrom: "both" })
+  };
+
+  it("flows through discovery with zero normalizer changes", async () => {
+    const probe = scriptedProbe({
+      acme: { version: "9.9.9", help: "flags: --acp-stdio start ACP" }
+    });
+    const agents = await discoverLocalAcpAgents({
+      probe,
+      strategies: [...BUILT_IN_ACP_STRATEGIES, acmeStrategy]
+    });
+    const acme = agents.find((a) => a.strategyId === "acme");
+    expect(acme).toMatchObject({ command: "acme", args: ["--acp-stdio"], backendId: "acp:acme" });
+  });
+
+  it("normalizes its stream using the same AcpSessionNormalizer (no agent-id branch)", () => {
+    const normalizer = new AcpSessionNormalizer({ quirks: acmeStrategy.quirks });
+    const ctx = { threadId: acmeStrategy.backendId, turnId: "t1" };
+    // surfaceThoughts:false → thought suppressed; both → recognizes a summary title.
+    expect(
+      normalizer.apply(
+        { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "secret" } },
+        ctx
+      ).events
+    ).toEqual([]);
+    expect(
+      normalizer.apply(
+        { sessionUpdate: "session_summary_generated", session_summary: "Acme Title" },
+        ctx
+      ).title
+    ).toBe("Acme Title");
+    // Ordinary message chunk still produces a delta — no special-casing.
+    const events: NormalizedThreadEvent[] = normalizer.apply(
+      { sessionUpdate: "agent_message_chunk", content: "hi" },
+      ctx
+    ).events;
+    expect(events[0]).toMatchObject({ kind: "agent_message_delta", delta: "hi" });
+  });
+
+  it("drives a turn through AcpAgentClient using the synthetic strategy", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({ transport, strategy: acmeStrategy, now: () => 1 });
+    const { threadId } = await client.startThread();
+    expect(threadId).toMatch(/^acp:acme:/);
+    const events: NormalizedThreadEvent[] = [];
+    client.onEvent((e) => events.push(e));
+    const turn = client.startTurn({ threadId, prompt: "go" });
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt();
+    await turn;
+    expect(events.some((e) => e.kind === "agent_message" && e.message.text === "ok")).toBe(true);
+  });
+});
+
+describe("normalizer has no inline agent-id branch (KTD-A2 guard)", async () => {
+  it("contains no `agentId ===` / `backendId ===` / `=== \"gemini\"` literal", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const { fileURLToPath } = await import("node:url");
+    const path = fileURLToPath(new URL("../src/normalizer/acp-normalizer.ts", import.meta.url));
+    const source = await readFile(path, "utf8");
+    expect(/agentId\s*===|backendId\s*===|===\s*["']gemini["']|===\s*["']grok["']|===\s*["']kimi["']|===\s*["']qwen["']/.test(source)).toBe(false);
+  });
+});

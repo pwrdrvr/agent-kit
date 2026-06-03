@@ -1,0 +1,50 @@
+{
+  "name": "@pwrdrvr/agent-acp",
+  "version": "0.1.0",
+  "description": "ACP (Agent Client Protocol) backend adapter for agent-kit: speaks ACP over stdio to local Kimi/Qwen/Gemini/Grok CLIs and normalizes their session/update stream into the agent-core neutral schema.",
+  "license": "MIT",
+  "author": "PwrDrvr LLC",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@pwrdrvr/agent-core": "workspace:^",
+    "@pwrdrvr/agent-transport": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pwrdrvr/agent-kit.git",
+    "directory": "packages/agent-acp"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "agent",
+    "gemini",
+    "grok",
+    "kimi",
+    "qwen",
+    "adapter"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
