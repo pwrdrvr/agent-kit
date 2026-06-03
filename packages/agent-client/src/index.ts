@@ -60,9 +60,9 @@ export {
   ChatThreadController,
   localDateStamp,
   type ChatThreadControllerDeps,
-  type ChatThreadView,
+  type ChatBackend,
   type ChatBroadcast,
+  type ChatControllerEvent,
   type ChatSystemPromptBuilder,
-  type ChatSettingsSnapshot,
   type ToolLabelMap
 } from "./chat/chat-thread-controller";

@@ -8,7 +8,7 @@ import {
   type NormalizedThreadEvent,
   type NormalizedToolCall,
   type NormalizedThread,
-  type NormalizedThreadSummary,
+  type NormalizedThreadRecord,
   type NormalizedUsageRecord,
   type ThreadStore,
   type ThreadId
@@ -84,37 +84,109 @@ describe("NormalizedToolCall mapping", () => {
 });
 
 describe("interfaces", () => {
-  it("an in-memory ThreadStore satisfies the seam", async () => {
+  it("an in-memory ThreadStore satisfies the expanded seam", async () => {
     const usage: NormalizedUsageRecord[] = [];
-    const threads = new Map<ThreadId, NormalizedThread>();
+    const records = new Map<ThreadId, NormalizedThreadRecord>();
+    const journals = new Map<ThreadId, unknown[]>();
+    let prepared = 0;
 
     const store: ThreadStore = {
       async recordUsage(record) {
         usage.push(record);
       },
-      async saveThread(thread) {
-        threads.set(thread.id, thread);
+      async prepareThreadDir(name) {
+        return { path: `/tmp/threads/${++prepared}-${name}` };
       },
-      async loadThread(id) {
-        return threads.get(id) ?? null;
+      async discardPreparedThreadDir() {},
+      async create(opts) {
+        const now = new Date().toISOString();
+        const record: NormalizedThreadRecord = {
+          threadId: opts.threadId,
+          name: opts.name,
+          createdAt: now,
+          modifiedAt: now,
+          anchorId: opts.anchorId ?? null,
+          anchorHistory: [],
+          archived: false,
+          pinned: false
+        };
+        records.set(opts.threadId, record);
+        journals.set(opts.threadId, []);
+        return record;
       },
-      async listThreads(): Promise<NormalizedThreadSummary[]> {
-        return [...threads.values()].map((t) =>
-          t.status === undefined ? { id: t.id } : { id: t.id, status: t.status }
-        );
+      async list(opts) {
+        return [...records.values()].filter((r) => {
+          if (opts?.includeArchived !== true && r.archived) return false;
+          if (opts?.anchorId !== undefined && r.anchorId !== opts.anchorId) return false;
+          return true;
+        });
+      },
+      async get(threadId) {
+        return records.get(threadId) ?? null;
+      },
+      async update(threadId, patch) {
+        const r = records.get(threadId);
+        if (r === undefined) throw new Error(`unknown thread ${threadId}`);
+        const next: NormalizedThreadRecord = {
+          ...r,
+          ...(patch.name !== undefined ? { name: patch.name } : {}),
+          ...(patch.archived !== undefined ? { archived: patch.archived } : {}),
+          ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}),
+          modifiedAt: new Date().toISOString()
+        };
+        records.set(threadId, next);
+        return next;
+      },
+      async delete(threadId) {
+        records.delete(threadId);
+        journals.delete(threadId);
+      },
+      async appendAnchor(threadId, anchorId) {
+        const r = records.get(threadId);
+        if (r === undefined) throw new Error(`unknown thread ${threadId}`);
+        r.anchorId = anchorId;
+        r.anchorHistory = [...r.anchorHistory, { anchorId, at: new Date().toISOString() }];
+      },
+      async journalAppend(threadId, entry) {
+        const j = journals.get(threadId) ?? [];
+        j.push(entry);
+        journals.set(threadId, j);
+      },
+      async readJournal(threadId) {
+        return [...(journals.get(threadId) ?? [])];
+      },
+      async attachmentsDir(threadId) {
+        return `/tmp/threads/${threadId}/attachments`;
       }
     };
 
     const thread = createEmptyThread("t1");
     expect(thread).toEqual({ id: "t1", entries: [], messages: [], status: "active" });
 
-    await store.saveThread(thread);
-    await store.recordUsage({ threadId: "t1", turnId: "u1", usage: { totalTokens: 15 } });
+    const prep = await store.prepareThreadDir("My Chat");
+    const record = await store.create({ threadId: "t1", name: "My Chat", preparedDir: prep });
+    expect(record.threadId).toBe("t1");
+    expect(record.anchorId).toBeNull();
 
-    expect(await store.loadThread("t1")).toEqual(thread);
-    expect(await store.loadThread("missing")).toBeNull();
-    expect(await store.listThreads()).toEqual([{ id: "t1", status: "active" }]);
+    await store.appendAnchor("t1", "cap-7");
+    expect((await store.get("t1"))?.anchorId).toBe("cap-7");
+
+    await store.journalAppend("t1", { kind: "message", message: { id: "m1" } });
+    expect(await store.readJournal("t1")).toHaveLength(1);
+
+    const archived = await store.update("t1", { archived: true });
+    expect(archived.archived).toBe(true);
+    expect(await store.list()).toHaveLength(0); // archived excluded by default
+    expect(await store.list({ includeArchived: true })).toHaveLength(1);
+
+    await store.recordUsage({
+      threadId: "t1",
+      turnId: "u1",
+      usage: { totalTokens: 15, contextWindow: 200_000 },
+      contextWindow: 200_000
+    });
     expect(usage).toHaveLength(1);
+    expect(usage[0]?.contextWindow).toBe(200_000);
   });
 
   it("ships a usable noop logger and system clock", () => {

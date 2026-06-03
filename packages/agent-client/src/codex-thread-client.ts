@@ -15,6 +15,11 @@
 
 import {
   noopLogger,
+  type AgentBackend,
+  type AgentBackendApprovalHandler,
+  type AgentBackendStartThreadResult,
+  type AgentBackendToolCall,
+  type AgentBackendToolCallHandler,
   type Logger,
   type NormalizedThreadEvent,
   type NormalizedApprovalDecision
@@ -33,7 +38,6 @@ import type {
 } from "@pwrdrvr/codex-app-server-protocol";
 import type {
   AskForApproval,
-  DynamicToolCallParams,
   DynamicToolCallResponse,
   DynamicToolSpec,
   SandboxMode,
@@ -98,16 +102,20 @@ export type CodexStartTurnOptions = {
   effort?: string;
 };
 
-/** Handles a dynamic tool ServerRequest; returns the protocol response. */
-export type CodexToolCallHandler = (
-  params: DynamicToolCallParams
-) => Promise<DynamicToolCallResponse>;
+/**
+ * Handles a tool-call ServerRequest. Reconciled to the canonical
+ * `AgentBackendToolCallHandler` shape so the controller drives Codex and ACP
+ * identically: the handler receives a neutral `AgentBackendToolCall`
+ * (`{ method, params }`) and returns an `unknown` payload the client forwards
+ * back to Codex verbatim. For Codex the `params` is a `DynamicToolCallParams`
+ * (cast at the dispatch site) and the returned payload is a
+ * `DynamicToolCallResponse`.
+ */
+export type CodexToolCallHandler = AgentBackendToolCallHandler;
 
-/** Handles an approval ServerRequest; resolves to a neutral decision. */
-export type CodexApprovalHandler = (
-  method: string,
-  params: unknown
-) => Promise<NormalizedApprovalDecision>;
+/** Handles an approval ServerRequest; resolves to a neutral decision. Identical
+ *  to the canonical `AgentBackendApprovalHandler`. */
+export type CodexApprovalHandler = AgentBackendApprovalHandler;
 
 export type Unsubscribe = () => void;
 
@@ -134,7 +142,9 @@ function approvalResponseFor(decision: NormalizedApprovalDecision): unknown {
   }
 }
 
-export class CodexThreadClient {
+export class CodexThreadClient
+  implements AgentBackend<CodexStartThreadOptions, CodexStartTurnOptions>
+{
   private readonly requestTimeoutMs: number;
   private readonly turnTimeoutMs: number;
   private readonly logger: Logger;
@@ -381,7 +391,11 @@ export class CodexThreadClient {
           success: false
         } satisfies DynamicToolCallResponse;
       }
-      return await handler(params as DynamicToolCallParams);
+      // Canonical `AgentBackendToolCall` shape: the host's handler reads
+      // `call.params` (a `DynamicToolCallParams` for Codex) and returns the
+      // `DynamicToolCallResponse` we forward back to Codex verbatim.
+      const call: AgentBackendToolCall = { method, params };
+      return await handler(call);
     }
 
     if (CODEX_APPROVAL_METHODS.has(method)) {

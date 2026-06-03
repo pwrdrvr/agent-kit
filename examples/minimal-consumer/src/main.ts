@@ -17,6 +17,10 @@ import {
 } from "@pwrdrvr/agent-client";
 import type { NormalizedThreadEvent } from "@pwrdrvr/agent-core";
 
+/** The Codex tool-call params shape `dispatchToolCall` expects — derived from its
+ *  signature so the example needs no direct dependency on the protocol package. */
+type CodexToolCallParams = Parameters<typeof dispatchToolCall>[0];
+
 async function main(): Promise<void> {
   // 1. A host tool. The kit owns the contract (name + zod schema + dispatch);
   //    the body is ours. The model calls it; agent-client routes it here.
@@ -35,8 +39,10 @@ async function main(): Promise<void> {
   // 2. Connect. `command` defaults to discovery (newest installed Codex).
   const client = new CodexThreadClient({ clientName: "agent-kit-demo" });
 
-  // The model's tool call → our catalog's validated dispatch.
-  client.onToolCall((params) => dispatchToolCall(params, catalog));
+  // The model's tool call → our catalog's validated dispatch. `onToolCall` now
+  // delivers the canonical `AgentBackendToolCall` ({ method, params }); for Codex
+  // the params are a `DynamicToolCallParams`.
+  client.onToolCall((call) => dispatchToolCall(call.params as CodexToolCallParams, catalog));
 
   // 3. Print every normalized event. This is the whole point: one neutral
   //    vocabulary regardless of backend.

@@ -5,6 +5,7 @@ export * from "./schema/tool-call";
 export * from "./schema/usage";
 export * from "./schema/approval";
 export * from "./schema/thread";
+export * from "./schema/thread-record";
 export * from "./schema/thread-events";
 
 export * from "./interfaces/logger";

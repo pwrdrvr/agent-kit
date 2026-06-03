@@ -72,13 +72,17 @@ export type NormalizedThreadEntry =
   | NormalizedActivityEntry
   | NormalizedPlanEntry;
 
-export type NormalizedThreadStatus = "active" | "idle" | "unknown";
+// Coarse activity of a materialized/persisted thread. Distinct from the
+// controller's live lifecycle `NormalizedThreadStatus` (the discriminated
+// idle/streaming/awaiting_approval union in thread-record.ts) — this one is the
+// at-rest summary a transcript carries.
+export type NormalizedThreadActivity = "active" | "idle" | "unknown";
 
 export type NormalizedThread = {
   id: ThreadId;
   entries: NormalizedThreadEntry[];
   messages: NormalizedMessage[];
-  status?: NormalizedThreadStatus;
+  status?: NormalizedThreadActivity;
   lastUserMessage?: string;
   lastAssistantMessage?: string;
 };
@@ -86,7 +90,7 @@ export type NormalizedThread = {
 export type NormalizedThreadSummary = {
   id: ThreadId;
   title?: string;
-  status?: NormalizedThreadStatus;
+  status?: NormalizedThreadActivity;
   updatedAt?: number;
 };
 

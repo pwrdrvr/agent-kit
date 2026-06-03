@@ -1,43 +1,53 @@
-// Surface-agnostic chat controller over a CodexThreadClient.
+// The CANONICAL, backend-agnostic chat controller for agent-kit.
 //
-// Ties together a shared CodexThreadClient (one connection, many threads), an
-// injected agent-core ThreadStore (persistence + usage), and a host-supplied
-// tool catalog + prompt builders. It owns the per-turn lifecycle: snapshot
-// settings at turn start, stream deltas, route tool calls, account usage,
-// gate approvals, rate-limit.
+// Ties together a shared `AgentBackend` (one connection, many threads — Codex
+// App Server OR an ACP agent, driven identically), an injected agent-core
+// `ThreadStore` (thread index + per-turn journal + usage accounting), and a
+// host-supplied tool catalog + prompt builders. It owns orchestration + the
+// method surface (createThread / listThreads / rename / archive / sendMessage /
+// getHistory / interrupt / resolveApproval / wire); the host owns storage and
+// maps the controller's `ChatControllerEvent`s to its own IPC.
 //
-// Ported from PwrSnap's ChatThreadController with the product seams broken:
+// Ported from PwrSnap's ChatThreadController with every product seam broken:
 //   • persistence is the injected `ThreadStore` (no better-sqlite3, no
-//     saveAiThreadUsage import);
+//     saveAiThreadUsage / estimateAiUsageCost import — the host computes cost in
+//     its store impl via `recordUsage`);
+//   • the backend is an `AgentBackend` (not a concrete CodexThreadClient), and
+//     the controller subscribes via `backend.onEvent((e) => …)` switching on
+//     `e.kind` instead of six granular per-event hooks;
 //   • the catalog, `dispatchToolCall`, `buildSystemPrompt`, `buildTurnContext`,
 //     and `broadcast` are all injected — no command bus, no PwrSnap tools or
-//     event channels;
-//   • subscribers receive agent-core `NormalizedThreadEvent`s (the controller
-//     re-broadcasts the client's normalized stream plus its own
-//     turn_started / agent_message / turn_completed / approval events). It must
-//     work unchanged for a "library chat" or a "sizzle chat" host.
+//     typed event channels; `broadcast` takes a single neutral
+//     `ChatControllerEvent`;
+//   • `Settings` is generic (`TSettings`); the controller freezes a snapshot at
+//     turn start and forwards it to the prompt builder, NEVER inspecting fields.
 //
-// Load-bearing design:
+// Load-bearing design (preserved verbatim from PwrSnap):
 //   • Per-thread TurnState in a Map, NEVER a singleton — two threads can stream
 //     concurrently without cross-wiring.
 //   • Settings are SNAPSHOTTED at turn start; a mid-turn change does not
 //     retro-apply to the in-flight turn.
 //   • Approvals carry (threadId, turnId, approvalId); a late / mismatched
 //     resolution is rejected, never resolves the wrong turn.
+//   • The host UI is a VIEW of this controller's state — all mutation flows out
+//     via the `broadcast` seam.
 
 import {
-  mergeToolCall,
   noopLogger,
+  type AgentBackend,
+  type AgentBackendToolCall,
   type Logger,
   type NormalizedApprovalDecision,
   type NormalizedApprovalRequest,
   type NormalizedMessage,
-  type NormalizedThread,
-  type NormalizedThreadEntry,
   type NormalizedThreadEvent,
+  type NormalizedThreadRecord,
+  type NormalizedThreadStatus,
+  type NormalizedThreadView,
   type NormalizedTokenUsage,
   type NormalizedToolCall,
   type NormalizedTurnStatus,
+  type ThreadListOptions,
   type ThreadStore
 } from "@pwrdrvr/agent-core";
 import type {
@@ -46,42 +56,65 @@ import type {
   DynamicToolSpec,
   UserInput
 } from "@pwrdrvr/codex-app-server-protocol/v2";
-import type { CodexThreadClient } from "../codex-thread-client";
+import type { CodexStartThreadOptions, CodexStartTurnOptions } from "../codex-thread-client";
 
-/** Generic settings snapshot. The host shapes this; the controller only freezes
- *  and forwards it to the prompt builder, never inspects it. */
-export type ChatSettingsSnapshot = unknown;
+/** The backend the controller drives. Codex (`CodexThreadClient`) and ACP
+ *  (`AcpAgentClient`) both implement `AgentBackend`; the controller passes
+ *  Codex-shaped thread/turn options, so a non-Codex backend is wrapped by a thin
+ *  host adapter while the neutral event / tool / approval seams stay identical. */
+export type ChatBackend = AgentBackend<CodexStartThreadOptions, CodexStartTurnOptions>;
 
 /** Builds the per-thread system prompt (base + host guidance). Injected as
- *  `baseInstructions` at thread/start. */
-export type ChatSystemPromptBuilder = (input: {
-  settings: ChatSettingsSnapshot;
+ *  `baseInstructions` at thread/start. Receives the frozen settings snapshot and
+ *  the thread's anchor; the controller never inspects `TSettings`. */
+export type ChatSystemPromptBuilder<TSettings = unknown> = (input: {
+  settings: TSettings;
   anchorId: string | null;
 }) => string;
 
-/** Re-broadcasts the controller's normalized event stream to the host's UI.
- *  Surface-agnostic: a library-chat host and a sizzle-chat host pass their own. */
-export type ChatBroadcast = (event: NormalizedThreadEvent) => void;
+/**
+ * The neutral event union the controller broadcasts. The host maps these to its
+ * own IPC. Surface-agnostic: a library-chat host and a sizzle-chat host map the
+ * same union. Generalizes PwrSnap's six typed `events:*Chat:*` channels.
+ */
+export type ChatControllerEvent =
+  | { type: "thread_updated"; thread: NormalizedThreadView }
+  | { type: "stream_delta"; threadId: string; turnId: string; messageId: string; delta: string }
+  | { type: "tool_call"; threadId: string; turnId: string; toolCall: NormalizedToolCall }
+  | { type: "message_committed"; threadId: string; message: NormalizedMessage }
+  | { type: "turn_interrupted"; threadId: string; turnId: string }
+  | {
+      type: "approval_requested";
+      threadId: string;
+      turnId: string;
+      approval: NormalizedApprovalRequest;
+    };
+
+/** Re-broadcasts the controller's neutral event stream to the host's UI. */
+export type ChatBroadcast = (event: ChatControllerEvent) => void;
 
 /** Friendly present-tense labels for tool activity chips, keyed by tool name. */
 export type ToolLabelMap = Record<string, string>;
 
-export type ChatThreadControllerDeps = {
-  client: CodexThreadClient;
+export type ChatThreadControllerDeps<TSettings = unknown> = {
+  /** The shared backend (Codex or ACP). */
+  client: ChatBackend;
+  /** Host persistence: thread index + per-turn journal + usage accounting. */
   store: ThreadStore;
   /** Reads the current host settings snapshot (frozen per turn). */
-  readSettings: () => Promise<ChatSettingsSnapshot>;
-  /** Re-broadcasts normalized events to the host UI. */
+  readSettings: () => Promise<TSettings>;
+  /** Re-broadcasts neutral controller events to the host UI. */
   broadcast: ChatBroadcast;
-  buildSystemPrompt: ChatSystemPromptBuilder;
+  /** Builds the per-thread system prompt. */
+  buildSystemPrompt: ChatSystemPromptBuilder<TSettings>;
   /** Per-turn runtime context (L3), sent as a leading turn item framed as
    *  system-generated — never folded into the user's message. Receives the
    *  turn's anchor. Omit for no per-turn context. */
   buildTurnContext?: (anchor: string) => string;
   /** DynamicToolSpec[] registered on every thread/start. */
   catalog?: DynamicToolSpec[];
-  /** Routes an incoming item/tool/call to the host's tools. Defaults to a
-   *  no-tools responder when omitted. */
+  /** Routes an incoming tool call to the host's tools. Defaults to a no-tools
+   *  responder when omitted. */
   dispatchToolCall?: (params: DynamicToolCallParams) => Promise<DynamicToolCallResponse>;
   /** Friendly chip labels for tool activity. */
   toolLabels?: ToolLabelMap;
@@ -96,24 +129,20 @@ export type ChatThreadControllerDeps = {
   threadEnvironments?: unknown[];
   /** Reasoning effort for turns. Defaults to "medium". */
   effort?: string;
-  /** Model attribution recorded with usage; the controller fills it from
-   *  thread_settings events when Codex reports them. */
   logger?: Logger;
   /** Injectable clock for tests. */
   now?: () => number;
 };
 
 /** Per-thread, in-flight turn state. */
-type TurnState = {
+type TurnState<TSettings> = {
   turnId: string;
   assistantMessageId: string;
   /** Accumulated streamed text for the in-flight assistant message. */
   buffer: string;
   /** Frozen at turn start — a mid-turn settings change can't retro-apply. */
-  settingsSnapshot: ChatSettingsSnapshot;
+  settingsSnapshot: TSettings;
   tokenUsage: NormalizedTokenUsage | null;
-  /** Live tool calls keyed by id (merged across tool_call → tool_call_update). */
-  toolCalls: Map<string, NormalizedToolCall>;
 };
 
 type ThreadModelState = {
@@ -130,44 +159,34 @@ type PendingApproval = {
   resolve: (decision: NormalizedApprovalDecision) => void;
 };
 
-export type ChatThreadView = {
-  threadId: string;
-  name: string;
-  anchorId: string | null;
-  model: string | null;
-  modelProvider: string | null;
-  serviceTier: string | null;
-};
+/** One journal entry: a committed chat message. */
+type JournalMessageEntry = { kind: "message"; message: NormalizedMessage };
 
 const RATE_LIMIT_TURNS = 5;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 
-export class ChatThreadController {
-  private readonly deps: ChatThreadControllerDeps;
+export class ChatThreadController<TSettings = unknown> {
+  private readonly deps: ChatThreadControllerDeps<TSettings>;
   private readonly logger: Logger;
-  private readonly turns = new Map<string, TurnState>();
+  private readonly turns = new Map<string, TurnState<TSettings>>();
   private readonly pendingApprovals = new Map<string, PendingApproval>();
   /** Per-thread recent turn timestamps for rate limiting. */
   private readonly turnTimestamps = new Map<string, number[]>();
   private readonly threadModels = new Map<string, ThreadModelState>();
-  /** Materialized transcript per thread (committed messages). */
-  private readonly transcripts = new Map<string, NormalizedMessage[]>();
-  private readonly threadNames = new Map<string, string>();
-  private readonly threadAnchors = new Map<string, string | null>();
   private wired = false;
 
-  constructor(deps: ChatThreadControllerDeps) {
+  constructor(deps: ChatThreadControllerDeps<TSettings>) {
     this.deps = deps;
     this.logger = deps.logger ?? noopLogger;
   }
 
-  /** Wire the shared client's subscription hooks ONCE. Idempotent. */
+  /** Wire the shared backend's subscription hooks ONCE. Idempotent. */
   wire(): void {
     if (this.wired) return;
     this.wired = true;
     const { client } = this.deps;
-    client.onEvent((event) => this.onClientEvent(event));
-    client.onToolCall((params) => this.onToolCall(params));
+    client.onEvent((event) => this.onBackendEvent(event));
+    client.onToolCall((call) => this.onToolCall(call));
     client.onApprovalRequest((method, params) => this.onApprovalRequest(method, params));
   }
 
@@ -179,26 +198,38 @@ export class ChatThreadController {
 
   async createThread(
     opts: { name?: string; anchorId?: string | null } = {}
-  ): Promise<ChatThreadView> {
+  ): Promise<NormalizedThreadView> {
     const anchorId = opts.anchorId ?? null;
     const settings = await this.deps.readSettings();
     const baseInstructions = this.deps.buildSystemPrompt({ settings, anchorId });
     const displayName =
       opts.name && opts.name.trim().length > 0 ? opts.name.trim() : this.defaultName();
 
-    const started = await this.deps.client.startThread({
-      ...(this.deps.approvalPolicy !== undefined ? { approvalPolicy: this.deps.approvalPolicy } : {}),
-      ...(this.deps.sandbox !== undefined ? { sandbox: this.deps.sandbox } : {}),
-      baseInstructions,
-      ...(this.deps.serviceName !== undefined ? { serviceName: this.deps.serviceName } : {}),
-      ...(this.deps.catalog !== undefined ? { dynamicTools: this.deps.catalog } : {}),
-      ...(this.deps.threadConfig !== undefined ? { config: this.deps.threadConfig } : {}),
-      ...(this.deps.threadEnvironments !== undefined
-        ? { environments: this.deps.threadEnvironments }
-        : {})
-    });
+    const preparedDir = await this.deps.store.prepareThreadDir(displayName);
 
-    await this.deps.client.clearThreadGitInfo(started.threadId).catch((cause) => {
+    let started: { threadId: string } & Partial<ThreadModelState>;
+    try {
+      started = await this.deps.client.startThread({
+        ...(this.deps.approvalPolicy !== undefined
+          ? { approvalPolicy: this.deps.approvalPolicy }
+          : {}),
+        ...(this.deps.sandbox !== undefined ? { sandbox: this.deps.sandbox } : {}),
+        baseInstructions,
+        cwd: preparedDir.path,
+        runtimeWorkspaceRoots: [preparedDir.path],
+        ...(this.deps.serviceName !== undefined ? { serviceName: this.deps.serviceName } : {}),
+        ...(this.deps.catalog !== undefined ? { dynamicTools: this.deps.catalog } : {}),
+        ...(this.deps.threadConfig !== undefined ? { config: this.deps.threadConfig } : {}),
+        ...(this.deps.threadEnvironments !== undefined
+          ? { environments: this.deps.threadEnvironments }
+          : {})
+      });
+    } catch (cause) {
+      await this.deps.store.discardPreparedThreadDir(preparedDir).catch(() => undefined);
+      throw cause;
+    }
+
+    await this.deps.client.clearThreadGitInfo?.(started.threadId).catch((cause) => {
       this.logger.warn("chat thread git metadata clear failed", {
         threadId: started.threadId,
         message: cause instanceof Error ? cause.message : String(cause)
@@ -206,16 +237,52 @@ export class ChatThreadController {
     });
 
     this.threadModels.set(started.threadId, {
-      model: started.model,
-      modelProvider: started.modelProvider,
-      serviceTier: started.serviceTier
+      model: started.model ?? null,
+      modelProvider: started.modelProvider ?? null,
+      serviceTier: started.serviceTier ?? null
     });
-    this.threadNames.set(started.threadId, displayName);
-    this.threadAnchors.set(started.threadId, anchorId);
-    this.transcripts.set(started.threadId, []);
 
-    await this.persistThread(started.threadId);
-    return this.toView(started.threadId);
+    // Glue the thread to the subject it was started from. Null anchor = an
+    // unscoped thread. The anchor is written in the SAME insert as the rest of
+    // the row — one write, not create-then-update.
+    const record = await this.deps.store.create({
+      threadId: started.threadId,
+      name: displayName,
+      anchorId,
+      preparedDir
+    });
+    const view = this.toView(record);
+    this.deps.broadcast({ type: "thread_updated", thread: view });
+    return view;
+  }
+
+  async listThreads(
+    opts: { includeArchived?: boolean; anchorId?: string | null } = {}
+  ): Promise<NormalizedThreadView[]> {
+    // Filtering (archived + anchor scoping) is pushed into the store's indexed
+    // query — no full scan in the controller. When an anchor is supplied the list
+    // is scoped to that subject's threads; when omitted, every anchor is listed.
+    const listOpts: ThreadListOptions = {
+      includeArchived: opts.includeArchived ?? false,
+      ...(opts.anchorId !== undefined ? { anchorId: opts.anchorId } : {})
+    };
+    const records = await this.deps.store.list(listOpts);
+    return records.map((r) => this.toView(r));
+  }
+
+  async rename(threadId: string, name: string): Promise<NormalizedThreadView> {
+    const record = await this.deps.store.update(threadId, { name: name.trim() });
+    const view = this.toView(record);
+    this.deps.broadcast({ type: "thread_updated", thread: view });
+    return view;
+  }
+
+  async archive(threadId: string, archived: boolean): Promise<NormalizedThreadView> {
+    const record = await this.deps.store.update(threadId, { archived });
+    if (archived) await this.deps.client.archiveThread?.(threadId).catch(() => undefined);
+    const view = this.toView(record);
+    this.deps.broadcast({ type: "thread_updated", thread: view });
+    return view;
   }
 
   // ---- turns ----
@@ -231,12 +298,12 @@ export class ChatThreadController {
     }
     this.enforceRateLimit(threadId);
 
-    if (input.anchorId !== undefined) {
-      this.threadAnchors.set(threadId, input.anchorId);
+    if (input.anchorId !== undefined && input.anchorId !== null) {
+      await this.deps.store.appendAnchor(threadId, input.anchorId);
     }
 
-    // Persist + broadcast the user message BEFORE starting the turn so a
-    // dispatch failure doesn't lose the typed prompt.
+    // Persist + broadcast the user message BEFORE starting the turn so a dispatch
+    // failure doesn't lose the typed prompt.
     const userMessage: NormalizedMessage = {
       id: this.randomId(),
       role: "user",
@@ -252,7 +319,7 @@ export class ChatThreadController {
     // emitted only for the CURRENT turn (never accumulated) so the thread carries
     // no stale context blocks, and the static baseInstructions stays byte-
     // identical across turns so Codex can prompt-cache it.
-    const anchorForTurn = input.anchorId ?? this.threadAnchors.get(threadId) ?? null;
+    const anchorForTurn = input.anchorId ?? (await this.currentAnchor(threadId));
     const turnInput: UserInput[] = [];
     if (anchorForTurn !== null && this.deps.buildTurnContext !== undefined) {
       turnInput.push({
@@ -280,12 +347,6 @@ export class ChatThreadController {
         createdAt: this.now()
       };
       await this.commitMessage(threadId, failed);
-      this.broadcast({
-        kind: "turn_completed",
-        threadId,
-        turnId: "",
-        status: "failed"
-      });
       this.logger.warn("chat turn start failed", {
         threadId,
         message: cause instanceof Error ? cause.message : String(cause)
@@ -299,16 +360,15 @@ export class ChatThreadController {
       assistantMessageId,
       buffer: "",
       settingsSnapshot,
-      tokenUsage: null,
-      toolCalls: new Map()
+      tokenUsage: null
     });
     this.recordTurn(threadId);
-    this.broadcast({ kind: "turn_started", threadId, turnId });
+    await this.broadcastThreadStatus(threadId, { kind: "streaming", turnId });
     return { turnId };
   }
 
   async getHistory(threadId: string): Promise<NormalizedMessage[]> {
-    return [...(this.transcripts.get(threadId) ?? [])];
+    return this.readJournalMessages(threadId);
   }
 
   async interrupt(threadId: string): Promise<void> {
@@ -316,10 +376,7 @@ export class ChatThreadController {
     if (turn === undefined) return;
     await this.deps.client.interruptTurn(threadId).catch(() => undefined);
     await this.finalizeAssistant(threadId, "interrupted");
-  }
-
-  async archive(threadId: string): Promise<void> {
-    await this.deps.client.archiveThread(threadId).catch(() => undefined);
+    this.deps.broadcast({ type: "turn_interrupted", threadId, turnId: turn.turnId });
   }
 
   // ---- approval flow ----
@@ -340,21 +397,12 @@ export class ChatThreadController {
     pending.resolve(input.decision);
   }
 
-  // ---- client subscription handlers ----
+  // ---- backend subscription handlers ----
 
-  private onClientEvent(event: NormalizedThreadEvent): void {
+  private onBackendEvent(event: NormalizedThreadEvent): void {
     switch (event.kind) {
       case "agent_message_delta":
         this.onDelta(event.threadId, event.turnId, event.itemId, event.delta);
-        return;
-      case "reasoning_delta":
-        // Reasoning deltas are re-broadcast for the in-flight turn but not
-        // accumulated into the committed assistant message.
-        if (this.isCurrentTurn(event.threadId, event.turnId)) this.broadcast(event);
-        return;
-      case "tool_call":
-      case "tool_call_update":
-        this.onToolCallEvent(event);
         return;
       case "token_usage":
         this.onTokenUsage(event.threadId, event.turnId, event.usage);
@@ -365,51 +413,29 @@ export class ChatThreadController {
           modelProvider: event.settings.modelProvider ?? null,
           serviceTier: event.settings.serviceTier ?? null
         });
-        this.broadcast(event);
-        return;
-      case "agent_message":
-        // The final assistant message is committed at turn_completed from the
-        // accumulated buffer; the streamed `agent_message` is informational.
-        if (this.isCurrentTurn(event.threadId, event.turnId)) this.broadcast(event);
         return;
       case "turn_completed":
         void this.onTurnCompleted(event.threadId, event.turnId, event.status);
         return;
-      case "turn_started":
-      case "error":
-        this.broadcast(event);
-        return;
       default:
+        // reasoning_delta / agent_message / tool_call(_update) / plan_update /
+        // turn_started / approval_request / error are handled via the dedicated
+        // tool-call + approval seams or are informational; nothing to commit.
         return;
     }
-  }
-
-  private isCurrentTurn(threadId: string, turnId: string): boolean {
-    const turn = this.turns.get(threadId);
-    return turn !== undefined && turn.turnId === turnId;
   }
 
   private onDelta(threadId: string, turnId: string, itemId: string, delta: string): void {
     const turn = this.turns.get(threadId);
     if (turn === undefined || turn.turnId !== turnId) return;
     turn.buffer += delta;
-    this.broadcast({ kind: "agent_message_delta", threadId, turnId, itemId, delta });
-  }
-
-  private onToolCallEvent(
-    event: Extract<NormalizedThreadEvent, { kind: "tool_call" | "tool_call_update" }>
-  ): void {
-    const turn = this.turns.get(event.threadId);
-    if (turn === undefined || turn.turnId !== event.turnId) return;
-    if (event.kind === "tool_call") {
-      turn.toolCalls.set(event.toolCall.id, event.toolCall);
-    } else {
-      const prev = turn.toolCalls.get(event.toolCall.id);
-      if (prev !== undefined) {
-        turn.toolCalls.set(event.toolCall.id, mergeToolCall(prev, event.toolCall));
-      }
-    }
-    this.broadcast(event);
+    this.deps.broadcast({
+      type: "stream_delta",
+      threadId,
+      turnId,
+      messageId: turn.assistantMessageId,
+      delta
+    });
   }
 
   private async onTurnCompleted(
@@ -428,23 +454,29 @@ export class ChatThreadController {
     turn.tokenUsage = usage;
   }
 
-  private async onToolCall(params: DynamicToolCallParams): Promise<DynamicToolCallResponse> {
+  private async onToolCall(call: AgentBackendToolCall): Promise<unknown> {
+    const params = call.params as DynamicToolCallParams;
     const response = this.deps.dispatchToolCall
       ? await this.deps.dispatchToolCall(params)
       : ({
           contentItems: [{ type: "inputText", text: "No tools are enabled for this chat yet." }],
           success: false
         } satisfies DynamicToolCallResponse);
-    // Surface the tool invocation to the UI as it happens. Re-broadcast as a
-    // normalized tool_call_update carrying the call's terminal status.
-    this.broadcast({
-      kind: "tool_call_update",
+    // Surface the tool invocation to the chat UI as it happens (the activity chip
+    // + working indicator). Re-broadcast as a neutral `tool_call` event carrying
+    // the call's terminal status + a friendly label.
+    this.deps.broadcast({
+      type: "tool_call",
       threadId: params.threadId,
       turnId: params.turnId,
       toolCall: {
         id: params.callId,
+        name: params.tool,
+        kind: "other",
+        label: humanizeToolCall(params.tool, response.success, this.deps.toolLabels),
         status: response.success ? "completed" : "failed",
-        label: this.deps.toolLabels?.[params.tool] ?? params.tool
+        args: params.arguments,
+        result: response
       }
     });
     return response;
@@ -454,15 +486,16 @@ export class ChatThreadController {
     method: string,
     params: unknown
   ): Promise<NormalizedApprovalDecision> {
-    // Best-effort extraction of (threadId, turnId); Codex shapes vary by method.
+    // Best-effort extraction of (threadId, turnId); backend shapes vary by method.
     const p = (params ?? {}) as Record<string, unknown>;
     let threadId = typeof p.threadId === "string" ? p.threadId : "";
     let turnId = typeof p.turnId === "string" ? p.turnId : "";
 
-    // Codex doesn't always tag an approval with its (threadId, turnId). Without
-    // a threadId the host can't match the approval to a thread, so the promise
-    // below would never resolve and the turn would hang. Recover the only-
-    // possible thread when exactly one turn is in flight; otherwise auto-DENY.
+    // The backend doesn't always tag an approval with its (threadId, turnId).
+    // Without a threadId the host can't match the approval to a visible thread, so
+    // the promise below would never resolve and the turn would hang. Recover the
+    // only-possible thread when exactly one turn is in flight; otherwise auto-DENY
+    // (Default Access never auto-APPROVES) with a warning rather than deadlocking.
     if (threadId.length === 0) {
       const onlyEntry = this.turns.size === 1 ? [...this.turns.entries()][0] : undefined;
       if (onlyEntry !== undefined) {
@@ -488,13 +521,15 @@ export class ChatThreadController {
         approvalId,
         resolve
       });
-      this.broadcast({
-        kind: "approval_request",
-        threadId,
-        ...(turnId.length > 0 ? { turnId } : {}),
-        approval: request
-      });
+      this.deps.broadcast({ type: "approval_requested", threadId, turnId, approval: request });
+      void this.broadcastThreadStatus(threadId, { kind: "awaiting_approval", approvalId });
     });
+
+    const turn = this.turns.get(threadId);
+    void this.broadcastThreadStatus(
+      threadId,
+      turn ? { kind: "streaming", turnId: turn.turnId } : { kind: "idle" }
+    );
     return decision;
   }
 
@@ -524,56 +559,48 @@ export class ChatThreadController {
     });
 
     await this.commitMessage(threadId, message);
-    this.broadcast({ kind: "turn_completed", threadId, turnId: turn.turnId, status });
+    await this.broadcastThreadStatus(threadId, { kind: "idle" });
   }
 
-  private async recordUsage(threadId: string, turn: TurnState): Promise<void> {
+  private async recordUsage(threadId: string, turn: TurnState<TSettings>): Promise<void> {
     if (turn.tokenUsage === null) return;
     const model = this.threadModels.get(threadId);
+    const usage = turn.tokenUsage;
     await this.deps.store.recordUsage({
       threadId,
       turnId: turn.turnId,
       ...(model?.model != null ? { model: model.model } : {}),
-      usage: turn.tokenUsage,
+      usage,
+      ...(usage.contextWindow !== undefined ? { contextWindow: usage.contextWindow } : {}),
       at: this.now()
     });
   }
 
   private async commitMessage(threadId: string, message: NormalizedMessage): Promise<void> {
-    const transcript = this.transcripts.get(threadId) ?? [];
-    transcript.push(message);
-    this.transcripts.set(threadId, transcript);
-    await this.persistThread(threadId);
-    this.broadcast({
-      kind: "agent_message",
-      threadId,
-      turnId: this.turns.get(threadId)?.turnId ?? "",
-      message
-    });
+    const entry: JournalMessageEntry = { kind: "message", message };
+    await this.deps.store.journalAppend(threadId, entry);
+    this.deps.broadcast({ type: "message_committed", threadId, message });
   }
 
-  private async persistThread(threadId: string): Promise<void> {
-    await this.deps.store.saveThread(this.materializeThread(threadId));
+  private async readJournalMessages(threadId: string): Promise<NormalizedMessage[]> {
+    const entries = await this.deps.store.readJournal(threadId).catch(() => [] as unknown[]);
+    const messages: NormalizedMessage[] = [];
+    for (const entry of entries) {
+      if (
+        entry !== null &&
+        typeof entry === "object" &&
+        (entry as { kind?: unknown }).kind === "message"
+      ) {
+        const m = (entry as { message?: unknown }).message;
+        if (m !== undefined) messages.push(m as NormalizedMessage);
+      }
+    }
+    return messages;
   }
 
-  private materializeThread(threadId: string): NormalizedThread {
-    const messages = [...(this.transcripts.get(threadId) ?? [])];
-    const entries: NormalizedThreadEntry[] = messages.map((m) => ({ ...m, type: "message" }));
-    const lastUser = [...messages].reverse().find((m) => m.role === "user");
-    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
-    const thread: NormalizedThread = {
-      id: threadId,
-      entries,
-      messages,
-      status: this.turns.has(threadId) ? "active" : "idle"
-    };
-    if (lastUser !== undefined) thread.lastUserMessage = lastUser.text;
-    if (lastAssistant !== undefined) thread.lastAssistantMessage = lastAssistant.text;
-    return thread;
-  }
-
-  private broadcast(event: NormalizedThreadEvent): void {
-    this.deps.broadcast(event);
+  private async currentAnchor(threadId: string): Promise<string | null> {
+    const record = await this.deps.store.get(threadId);
+    return record?.anchorId ?? null;
   }
 
   private enforceRateLimit(threadId: string): void {
@@ -593,19 +620,32 @@ export class ChatThreadController {
     this.turnTimestamps.set(threadId, recent);
   }
 
-  private toView(threadId: string): ChatThreadView {
-    const model = this.threadModels.get(threadId) ?? {
-      model: null,
-      modelProvider: null,
-      serviceTier: null
-    };
+  private async broadcastThreadStatus(
+    threadId: string,
+    status: NormalizedThreadStatus
+  ): Promise<void> {
+    const record = await this.deps.store.get(threadId);
+    if (record === null) return;
+    this.deps.broadcast({ type: "thread_updated", thread: this.toView(record, status) });
+  }
+
+  private toView(
+    record: NormalizedThreadRecord,
+    status?: NormalizedThreadStatus
+  ): NormalizedThreadView {
+    const turn = this.turns.get(record.threadId);
+    const resolved: NormalizedThreadStatus =
+      status ?? (turn !== undefined ? { kind: "streaming", turnId: turn.turnId } : { kind: "idle" });
     return {
-      threadId,
-      name: this.threadNames.get(threadId) ?? "",
-      anchorId: this.threadAnchors.get(threadId) ?? null,
-      model: model.model,
-      modelProvider: model.modelProvider,
-      serviceTier: model.serviceTier
+      threadId: record.threadId,
+      name: record.name,
+      createdAt: record.createdAt,
+      modifiedAt: record.modifiedAt,
+      anchorId: record.anchorId,
+      archived: record.archived,
+      pinned: record.pinned,
+      lastMessagePreview: "",
+      status: resolved
     };
   }
 
@@ -628,6 +668,14 @@ export function localDateStamp(d: Date): string {
 
 function approvalKey(threadId: string, turnId: string, approvalId: string): string {
   return `${threadId}::${turnId}::${approvalId}`;
+}
+
+/** Friendly present-tense label for a tool invocation, shown as an activity chip.
+ *  The host supplies the label map; falls back to the raw tool name. The `ok` flag
+ *  lets a failed call read "couldn't …". */
+function humanizeToolCall(tool: string, ok: boolean, labels: ToolLabelMap = {}): string {
+  const label = labels[tool] ?? tool;
+  return ok ? label : `Couldn't: ${label.toLowerCase()}`;
 }
 
 function normalizeApprovalParams(

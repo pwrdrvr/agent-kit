@@ -59,6 +59,14 @@ export interface AgentBackend<
   startTurn(options: StartTurnOptions): Promise<{ turnId: string }>;
   /** Interrupt / cancel the in-flight turn for a thread. */
   interruptTurn(threadId: string): Promise<void>;
+  /** Archive a thread on the backend, when it has the concept. Optional: a
+   *  backend without server-side archive (the controller still archives the
+   *  index row via the `ThreadStore`) simply omits it. */
+  archiveThread?(threadId: string): Promise<void>;
+  /** Clear backend-side git metadata for a freshly-opened thread, when the
+   *  backend tracks it (Codex stamps the cwd's git info onto the thread; chat
+   *  threads in a scratch dir shouldn't carry it). Optional. */
+  clearThreadGitInfo?(threadId: string): Promise<void>;
   /** Subscribe to the normalized event stream. */
   onEvent(cb: (event: NormalizedThreadEvent) => void): Unsubscribe;
   /** Register the (single) tool-call server-request handler. */
