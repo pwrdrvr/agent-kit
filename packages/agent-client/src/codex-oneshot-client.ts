@@ -97,6 +97,9 @@ export type CodexOneShotRequest = {
   /** Reasoning effort for the turn. Defaults to "low". */
   effort?: string;
   model?: string | null;
+  /** Model provider (ThreadStartParams.modelProvider) for the worker thread.
+   *  Omit for the Codex default. Part of the worker-thread cache key. */
+  modelProvider?: string | null;
   abortSignal?: AbortSignal;
 };
 
@@ -194,6 +197,7 @@ export class CodexOneShotClient {
 
       thread = await this.getWorkerThread(
         request.model ?? null,
+        request.modelProvider ?? null,
         request.baseInstructions ?? ""
       );
 
@@ -288,9 +292,10 @@ export class CodexOneShotClient {
 
   private async getWorkerThread(
     model: string | null,
+    modelProvider: string | null,
     baseInstructions: string
   ): Promise<WorkerThread> {
-    const modelKey = `${model ?? "__default__"}::${baseInstructions}`;
+    const modelKey = `${model ?? "__default__"}@${modelProvider ?? "__default__"}::${baseInstructions}`;
     if (this.workerThread?.modelKey === modelKey) {
       return this.workerThread;
     }
@@ -314,6 +319,7 @@ export class CodexOneShotClient {
       "thread/start",
       {
         model,
+        ...(modelProvider !== null ? { modelProvider } : {}),
         ephemeral: false,
         cwd: workspaceDir,
         runtimeWorkspaceRoots: [workspaceDir],
