@@ -10,5 +10,6 @@ export * from "./schema/thread-events";
 export * from "./interfaces/logger";
 export * from "./interfaces/platform";
 export * from "./interfaces/thread-store";
+export * from "./interfaces/agent-backend";
 
 export * from "./normalize/tool-call";

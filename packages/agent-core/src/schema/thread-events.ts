@@ -20,6 +20,12 @@ export type NormalizedThreadSettings = {
   model?: string;
   modelProvider?: string;
   serviceTier?: string | null;
+  // KTD-A1 widening (shared by Codex too, not ACP-only): ACP agents expose a
+  // settable execution *mode* (Gemini/Grok "modes") distinct from the model.
+  // Codex has no mode concept today, so it simply omits this. A backend
+  // reports the id it changed to; the human-facing label rides `modeLabel`.
+  modeId?: string;
+  modeLabel?: string;
 };
 
 export type NormalizedThreadEvent =
