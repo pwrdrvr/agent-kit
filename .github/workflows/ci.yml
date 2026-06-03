@@ -27,11 +27,14 @@ jobs:
       - name: License policy
         run: pnpm lint:licenses
 
-      - name: Typecheck
-        run: pnpm typecheck
-
+      # Build first: packages typecheck against each other's emitted .d.ts
+      # (e.g. agent-transport imports @pwrdrvr/agent-core), so dist/ must exist
+      # before typecheck. pnpm -r build runs in topological (deps-first) order.
       - name: Build
         run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Test
         run: pnpm test

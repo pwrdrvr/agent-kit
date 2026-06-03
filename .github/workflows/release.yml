@@ -9,9 +9,13 @@ name: Release
 # npmjs.com pinned to this workflow + the `npm-publish` environment (same flow
 # as pwrdrvr/codex-app-server-protocol — see that repo's PUBLISHING.md).
 
+# Manual-only during buildout. Each package needs a one-time bootstrap publish +
+# trusted-publisher config on npmjs.com before `changeset publish` can push it
+# (same flow as pwrdrvr/codex-app-server-protocol). Until then an on-push trigger
+# would E404 on every commit. Re-enable `push: branches: [main]` at the publish
+# step (master plan U10) once the packages are bootstrapped.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
