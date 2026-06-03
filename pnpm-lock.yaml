@@ -33,6 +33,16 @@ importers:
         specifier: ^24.0.0
         version: 24.12.4
 
+  packages/codex-discovery:
+    dependencies:
+      '@pwrdrvr/agent-core':
+        specifier: workspace:^
+        version: link:../agent-core
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.12.4
+
 packages:
 
   '@babel/runtime@7.29.7':
