@@ -129,6 +129,11 @@ export type ChatThreadControllerDeps<TSettings = unknown> = {
   threadEnvironments?: unknown[];
   /** Reasoning effort for turns. Defaults to "medium". */
   effort?: string;
+  /** Default model id for thread/start (host's per-surface default). Omit for Codex default. */
+  model?: string;
+  /** Default model provider for thread/start — the "provider" a host picks when
+   *  more than one is configured. Omit for Codex default. */
+  modelProvider?: string;
   logger?: Logger;
   /** Injectable clock for tests. */
   now?: () => number;
@@ -214,6 +219,8 @@ export class ChatThreadController<TSettings = unknown> {
           ? { approvalPolicy: this.deps.approvalPolicy }
           : {}),
         ...(this.deps.sandbox !== undefined ? { sandbox: this.deps.sandbox } : {}),
+        ...(this.deps.model !== undefined ? { model: this.deps.model } : {}),
+        ...(this.deps.modelProvider !== undefined ? { modelProvider: this.deps.modelProvider } : {}),
         baseInstructions,
         cwd: preparedDir.path,
         runtimeWorkspaceRoots: [preparedDir.path],

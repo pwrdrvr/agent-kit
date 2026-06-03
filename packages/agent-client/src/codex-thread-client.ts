@@ -87,6 +87,14 @@ export type CodexStartThreadOptions = {
   runtimeWorkspaceRoots?: string[];
   serviceName?: string;
   personality?: string;
+  /** Model id to start the thread on (ThreadStartParams.model). Omit for the
+   *  Codex default. The host drives this from its settings (per-surface default). */
+  model?: string;
+  /** Model provider id (ThreadStartParams.modelProvider) — the "provider" a host
+   *  picks when more than one is configured. Omit for the Codex default. */
+  modelProvider?: string;
+  /** Service tier (ThreadStartParams.serviceTier), when the host pins one. */
+  serviceTier?: string;
   /** Per-thread Codex config overlay (the `-c key=value` mechanism). Used to
    *  disable Codex prompt/tool scaffolding that belongs to coding-agent threads. */
   config?: Record<string, unknown>;
@@ -200,6 +208,9 @@ export class CodexThreadClient
       persistExtendedHistory: false
     };
     if (opts.cwd !== undefined) params.cwd = opts.cwd;
+    if (opts.model !== undefined) params.model = opts.model;
+    if (opts.modelProvider !== undefined) params.modelProvider = opts.modelProvider;
+    if (opts.serviceTier !== undefined) params.serviceTier = opts.serviceTier;
     if (opts.runtimeWorkspaceRoots !== undefined) {
       params.runtimeWorkspaceRoots = opts.runtimeWorkspaceRoots;
     }
