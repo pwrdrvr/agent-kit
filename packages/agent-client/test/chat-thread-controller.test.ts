@@ -60,6 +60,12 @@ class FakeBackend {
     modelProvider: "openai",
     serviceTier: "default" as string | null
   }));
+  forkThread = vi.fn(async (_opts: unknown) => ({
+    threadId: `fork-${++this.threadCounter}`,
+    model: "gpt-5-codex",
+    modelProvider: "openai",
+    serviceTier: "default" as string | null
+  }));
 
   emit(e: NormalizedThreadEvent): void {
     this.eventCb?.(e);
@@ -304,6 +310,27 @@ describe("ChatThreadController", () => {
     expect((await controller.getHistory(tid)).find((m) => m.role === "assistant")?.text).toContain(
       "transient"
     );
+  });
+
+  it("forkThreadsForAnchor clones each source thread + its journal to the target anchor", async () => {
+    const { controller, client, store } = makeController();
+    const a = await controller.createThread({ name: "A", anchorId: "src" });
+    await controller.createThread({ name: "B", anchorId: "src" });
+    await store.journalAppend(a.threadId, {
+      kind: "message",
+      message: { id: "m1", role: "user", text: "hi" }
+    });
+
+    const forked = await controller.forkThreadsForAnchor({
+      sourceAnchorId: "src",
+      targetAnchorId: "dst"
+    });
+
+    expect(forked).toHaveLength(2);
+    expect(client.forkThread).toHaveBeenCalledTimes(2);
+    expect(forked.every((v) => v.anchorId === "dst")).toBe(true);
+    const forkedA = forked.find((v) => v.name === "A");
+    expect(await store.readJournal(forkedA!.threadId)).toHaveLength(1); // journal carried
   });
 
   it("createThread persists an index row, prepares a dir, and broadcasts a view", async () => {

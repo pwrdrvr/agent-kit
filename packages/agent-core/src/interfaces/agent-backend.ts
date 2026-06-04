@@ -59,6 +59,12 @@ export type AgentStartThreadOptions = {
   tools?: unknown[];
 };
 
+/** Neutral options for forking an existing thread into a fresh one (Codex
+ *  `thread/fork`). Same shape as starting a thread, plus the source thread id. */
+export type AgentForkThreadOptions = AgentStartThreadOptions & {
+  sourceThreadId: string;
+};
+
 /** Neutral turn content. Text plus optional local image paths the backend may
  *  attach (Codex `localImage`, ACP `image` content blocks). */
 export type AgentTurnInput = {
@@ -109,6 +115,10 @@ export interface AgentBackend {
   startTurn(options: AgentStartTurnOptions): Promise<{ turnId: string }>;
   /** Interrupt / cancel the in-flight turn for a thread. */
   interruptTurn(threadId: string): Promise<void>;
+  /** Fork an existing thread into a fresh one carrying its history (Codex
+   *  `thread/fork`). Optional: a backend without server-side fork (ACP) omits
+   *  it, and the controller's `forkThreadsForAnchor` throws if called. */
+  forkThread?(options: AgentForkThreadOptions): Promise<AgentBackendStartThreadResult>;
   /** Archive a thread on the backend, when it has the concept. Optional: a
    *  backend without server-side archive (the controller still archives the
    *  index row via the `ThreadStore`) simply omits it. */

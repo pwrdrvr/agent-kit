@@ -36,6 +36,7 @@ import {
   noopLogger,
   type AgentBackend,
   type AgentBackendToolCall,
+  type AgentForkThreadOptions,
   type AgentStartThreadOptions,
   type AgentStartTurnOptions,
   type AgentTurnInput,
@@ -316,6 +317,84 @@ export class ChatThreadController<TSettings = unknown> {
     const view = this.toView(record);
     this.deps.broadcast({ type: "thread_updated", thread: view });
     return view;
+  }
+
+  /** Fork every non-archived thread anchored to `sourceAnchorId` into fresh
+   *  threads anchored to `targetAnchorId`, carrying each source's journal — used
+   *  when a host duplicates a subject (e.g. a Sizzle reel) so its chats come
+   *  along. Requires a backend that supports forking (Codex `thread/fork`);
+   *  throws on a backend (ACP) that doesn't. */
+  async forkThreadsForAnchor(input: {
+    sourceAnchorId: string;
+    targetAnchorId: string;
+  }): Promise<NormalizedThreadView[]> {
+    const client = this.deps.client;
+    if (client.forkThread === undefined) {
+      throw new Error("the active backend does not support forking threads");
+    }
+    const forkThread = client.forkThread.bind(client);
+
+    const sourceThreads = await this.deps.store.list({
+      includeArchived: false,
+      anchorId: input.sourceAnchorId
+    });
+    if (sourceThreads.length === 0) return [];
+
+    const settings = await this.deps.readSettings();
+    const baseInstructions = this.deps.buildSystemPrompt({
+      settings,
+      anchorId: input.targetAnchorId
+    });
+    const forkedViews: NormalizedThreadView[] = [];
+
+    for (const source of sourceThreads) {
+      const preparedDir = await this.deps.store.prepareThreadDir(source.name);
+      const forkOptions: AgentForkThreadOptions = {
+        sourceThreadId: source.threadId,
+        instructions: baseInstructions,
+        cwd: preparedDir.path,
+        workspaceRoots: [preparedDir.path]
+      };
+      if (this.deps.approvalPolicy !== undefined) forkOptions.approvalPolicy = this.deps.approvalPolicy;
+      if (this.deps.sandbox !== undefined) forkOptions.sandbox = this.deps.sandbox;
+      if (this.deps.threadConfig !== undefined) forkOptions.config = this.deps.threadConfig;
+
+      let forked: { threadId: string } & Partial<ThreadModelState>;
+      try {
+        forked = await forkThread(forkOptions);
+      } catch (cause) {
+        await this.deps.store.discardPreparedThreadDir(preparedDir).catch(() => undefined);
+        throw cause;
+      }
+
+      await this.deps.client.clearThreadGitInfo?.(forked.threadId).catch((cause) => {
+        this.logger.warn("forked chat thread git metadata clear failed", {
+          threadId: forked.threadId,
+          message: cause instanceof Error ? cause.message : String(cause)
+        });
+      });
+      this.threadModels.set(forked.threadId, {
+        model: forked.model ?? null,
+        modelProvider: forked.modelProvider ?? null,
+        serviceTier: forked.serviceTier ?? null
+      });
+
+      const record = await this.deps.store.create({
+        threadId: forked.threadId,
+        name: source.name,
+        anchorId: input.targetAnchorId,
+        preparedDir
+      });
+      // Carry the source's per-turn journal so the forked thread shows history.
+      const journal = await this.deps.store.readJournal(source.threadId);
+      for (const entry of journal) {
+        await this.deps.store.journalAppend(forked.threadId, entry);
+      }
+      const view = this.toView(record);
+      this.deps.broadcast({ type: "thread_updated", thread: view });
+      forkedViews.push(view);
+    }
+    return forkedViews;
   }
 
   // ---- turns ----

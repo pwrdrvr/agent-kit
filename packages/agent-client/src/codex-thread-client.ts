@@ -20,6 +20,7 @@ import {
   type AgentBackendStartThreadResult,
   type AgentBackendToolCall,
   type AgentBackendToolCallHandler,
+  type AgentForkThreadOptions,
   type AgentStartThreadOptions,
   type AgentStartTurnOptions,
   type Logger,
@@ -43,6 +44,8 @@ import type {
   DynamicToolCallResponse,
   DynamicToolSpec,
   SandboxMode,
+  ThreadForkParams,
+  ThreadForkResponse,
   ThreadResumeParams,
   ThreadResumeResponse,
   ThreadStartParams,
@@ -236,6 +239,40 @@ export class CodexThreadClient implements AgentBackend {
     if (opts.environments !== undefined) native.environments = opts.environments;
     if (opts.tools !== undefined) native.dynamicTools = opts.tools as DynamicToolSpec[];
     return this.startThreadNative(native);
+  }
+
+  /** Fork an existing thread into a fresh one carrying its history (Codex
+   *  `thread/fork`). The new thread inherits the source's model/provider. */
+  async forkThread(opts: AgentForkThreadOptions): Promise<AgentBackendStartThreadResult> {
+    const connection = await this.getConnection();
+    await this.initialize();
+
+    const params: ThreadForkParams = {
+      threadId: opts.sourceThreadId,
+      persistExtendedHistory: false
+    };
+    if (opts.cwd !== undefined) params.cwd = opts.cwd;
+    if (opts.workspaceRoots !== undefined) params.runtimeWorkspaceRoots = [...opts.workspaceRoots];
+    if (opts.instructions !== undefined) params.baseInstructions = opts.instructions;
+    if (opts.approvalPolicy !== undefined) params.approvalPolicy = opts.approvalPolicy as AskForApproval;
+    if (opts.sandbox !== undefined) params.sandbox = opts.sandbox as SandboxMode;
+    if (opts.config !== undefined) {
+      params.config = opts.config as NonNullable<ThreadForkParams["config"]>;
+    }
+
+    const response = (await connection.request(
+      "thread/fork",
+      params,
+      this.requestTimeoutMs
+    )) as ThreadForkResponse;
+    const threadId = response.thread.id;
+    this.loadedThreadIds.add(threadId);
+    return {
+      threadId,
+      model: response.model,
+      modelProvider: response.modelProvider,
+      serviceTier: response.serviceTier
+    };
   }
 
   /** Codex-native thread/start. Builds `ThreadStartParams` directly. Exposed for
