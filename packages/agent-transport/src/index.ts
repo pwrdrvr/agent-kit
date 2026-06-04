@@ -1,5 +1,6 @@
-// @pwrdrvr/agent-transport — generic JSON-RPC 2.0 + stdio transport. Shared by
-// the Codex App Server adapter and ACP adapters.
+// @pwrdrvr/agent-transport — generic JSON-RPC 2.0 + stdio transport, plus the
+// shared login-shell PATH hydration every desktop host needs before spawning.
+// Shared by the Codex App Server adapter and ACP adapters.
 
 export {
   JsonRpcConnection,
@@ -17,3 +18,11 @@ export {
   StdioJsonRpcTransport,
   type StdioJsonRpcTransportOptions
 } from "./stdio-transport";
+
+export {
+  hydrateProcessEnvFromLoginShell,
+  mergeLoginShellEnvIntoEnv,
+  resolveInteractiveLoginShellEnv,
+  type ResolveLoginShellEnvOptions,
+  type MergeLoginShellEnvOptions
+} from "./shell-env";
