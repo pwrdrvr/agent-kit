@@ -24,6 +24,13 @@ export {
 } from "./acp-client";
 
 export {
+  AcpOneShotClient,
+  type AcpOneShotClientOptions,
+  type AcpOneShotRequest,
+  type AcpOneShotResponse
+} from "./acp-oneshot-client";
+
+export {
   AcpSessionNormalizer,
   type AcpNormalizerOptions,
   type AcpNormalizeResult,

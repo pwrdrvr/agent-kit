@@ -1,5 +1,18 @@
 # @pwrdrvr/agent-acp
 
+## 0.1.5
+
+### Patch Changes
+
+- Add `AcpOneShotClient` — a non-interactive single-turn driver over an ACP agent
+  (the ACP analog of `CodexOneShotClient`), for jobs like capture enrichment.
+  Keeps the agent process persistent and opens a FRESH session per `run()` (the
+  ACP equivalent of Codex's per-turn rollback), auto-denies approvals, and
+  rejects tool calls so the agent can only answer. ACP has no `outputSchema`, so
+  the caller bakes the "reply with JSON only" contract into the prompt and parses
+  the returned text. Verified live: Gemini-in-ACP took an image and returned
+  clean JSON.
+
 ## 0.1.4
 
 ### Patch Changes
