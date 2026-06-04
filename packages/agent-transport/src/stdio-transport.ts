@@ -7,6 +7,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import { type Logger, noopLogger } from "@pwrdrvr/agent-core";
 import type { JsonRpcTransport } from "./json-rpc";
+import { prependCommandDirToPath } from "./shell-env";
 
 export type StdioJsonRpcTransportOptions = {
   /** Fully-resolved executable path or command name. */
@@ -40,7 +41,10 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
       return;
     }
 
-    const env = this.options.env ?? process.env;
+    // Prepend the command's own dir to PATH so a node-version-manager CLI
+    // (a Node script) finds its sibling `node` even when launched from a
+    // GUI app's minimal PATH.
+    const env = prependCommandDirToPath(this.options.command, this.options.env ?? process.env);
     const args = this.options.args ?? [];
     this.logger.info("agent-transport launch", {
       command: this.options.command,

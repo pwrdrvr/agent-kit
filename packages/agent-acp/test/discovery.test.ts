@@ -144,6 +144,70 @@ describe("discoverLocalAcpAgentInstances — every installed instance", () => {
   });
 });
 
+describe("default executable lister — version-manager dirs", () => {
+  it("lists every nvm node bin dir (newest-first) plus other manager dirs", async () => {
+    const { mkdtempSync, mkdirSync } = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const { wellKnownAgentBinDirs } = await import(
+      "../src/discovery/acp-local-discovery"
+    );
+    const home = mkdtempSync(nodePath.join(os.tmpdir(), "agentkit-home-"));
+    for (const v of ["v20.0.0", "v24.16.0", "v22.1.0"]) {
+      mkdirSync(nodePath.join(home, ".nvm", "versions", "node", v, "bin"), {
+        recursive: true
+      });
+    }
+    const dirs = wellKnownAgentBinDirs(home);
+    // nvm bins come first, newest-first.
+    expect(dirs.slice(0, 3)).toEqual([
+      nodePath.join(home, ".nvm/versions/node/v24.16.0/bin"),
+      nodePath.join(home, ".nvm/versions/node/v22.1.0/bin"),
+      nodePath.join(home, ".nvm/versions/node/v20.0.0/bin")
+    ]);
+    // and the other well-known managers are included.
+    expect(dirs).toContain(nodePath.join(home, ".bun/bin"));
+    expect(dirs).toContain(nodePath.join(home, ".volta/bin"));
+    expect(dirs).toContain("/opt/homebrew/bin");
+  });
+
+  it("discovers an agent installed under an nvm node version that is NOT on PATH", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, chmodSync } = await import(
+      "node:fs"
+    );
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const home = mkdtempSync(nodePath.join(os.tmpdir(), "agentkit-nvm-"));
+    const bin = nodePath.join(home, ".nvm", "versions", "node", "v24.16.0", "bin");
+    mkdirSync(bin, { recursive: true });
+    const qwenBin = nodePath.join(bin, "qwen");
+    writeFileSync(qwenBin, "#!/bin/sh\n");
+    chmodSync(qwenBin, 0o755);
+
+    // PATH is launchd-minimal (no nvm) — the default lister must still find it
+    // via the nvm scan. Probe scripted to accept exactly that resolved path.
+    const probe = scriptedProbe({
+      [qwenBin]: { version: "0.16.1", help: "flags: --acp run ACP server" }
+    });
+    const prevHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const groups = await discoverLocalAcpAgentInstances({
+        probe,
+        env: { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv
+        // NOTE: real default lister (no listExecutables override) — exercises the nvm scan.
+      });
+      const qwen = groups.find((g) => g.strategyId === "qwen");
+      expect(qwen?.instances).toEqual([
+        { command: qwenBin, version: "0.16.1", source: "path" }
+      ]);
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
+});
+
 describe("strategy table extensibility (KTD-A2)", () => {
   // A synthetic 5th strategy: a new ACP agent added as a single table entry.
   const acmeStrategy: AcpAgentStrategy = {

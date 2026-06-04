@@ -54,6 +54,33 @@ export type MergeLoginShellEnvOptions = ResolveLoginShellEnvOptions & {
   resolveShellEnv?: (env: NodeJS.ProcessEnv) => NodeJS.ProcessEnv | undefined;
 };
 
+/**
+ * Return a COPY of `env` with the absolute `command`'s own directory prepended
+ * to `PATH`. No-op for a bare command name or when the dir is already on `PATH`.
+ *
+ * Why: a CLI installed by a node version manager is a Node script
+ * (`#!/usr/bin/env node`) living next to its `node` binary (e.g.
+ * `~/.nvm/versions/node/v24/bin/{qwen,node}`). Spawning the script with a
+ * `PATH` that lacks that `node` fails with `env: node: No such file or
+ * directory`. Prepending the executable's own dir guarantees the matching
+ * `node` (and other siblings) resolve — for both discovery probes and the
+ * real agent spawn.
+ */
+export function prependCommandDirToPath(
+  command: string,
+  env: NodeJS.ProcessEnv
+): NodeJS.ProcessEnv {
+  if (!path.isAbsolute(command)) return env;
+  const dir = path.dirname(command);
+  const key = env.Path !== undefined && env.PATH === undefined ? "Path" : "PATH";
+  const current = env[key] ?? "";
+  if (current.split(path.delimiter).includes(dir)) return env;
+  return {
+    ...env,
+    [key]: current.length > 0 ? dir + path.delimiter + current : dir
+  };
+}
+
 const ENV_MARKER_START = "__PWRDRVR_ENV_START__";
 const ENV_MARKER_END = "__PWRDRVR_ENV_END__";
 const DEFAULT_SHELL_PATH_TIMEOUT_MS = 5_000;

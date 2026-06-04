@@ -14,9 +14,11 @@
 // details live in the strategy, not inline branches.
 
 import { execFile as execFileCallback } from "node:child_process";
-import { realpathSync, statSync } from "node:fs";
+import { readdirSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { prependCommandDirToPath } from "@pwrdrvr/agent-transport";
 import { BUILT_IN_ACP_STRATEGIES } from "../strategies/index";
 import type {
   AcpAgentStrategy,
@@ -237,16 +239,25 @@ function canonicalize(command: string): string {
   }
 }
 
-/** Default `PATH` executable lister: scan each `PATH` dir for an executable
- *  file named `command`, in order. POSIX only (Windows returns none). */
+/** Default executable lister: scan `env.PATH` AND well-known version-manager /
+ *  install dirs for an executable file named `command`. POSIX only (Windows
+ *  returns none).
+ *
+ *  Scanning beyond `PATH` is deliberate: a desktop app launched from Finder /
+ *  Dock inherits launchd's minimal `PATH`, and login-shell hydration can't
+ *  reliably recover a version-manager `PATH` (nvm is often lazy-loaded and
+ *  pins a different node version than the one the agent CLI is installed
+ *  under). So an `npm i -g qwen` under nvm would be invisible. We find it by
+ *  scanning the version-manager bin dirs directly. */
 function defaultListExecutables(command: string, env: NodeJS.ProcessEnv): string[] {
   if (process.platform === "win32") return [];
   // A bare command name only — never enumerate when a path was passed.
   if (command.includes(path.sep)) return [];
-  const pathValue = env.PATH ?? env.Path ?? "";
   const found: string[] = [];
-  for (const dir of pathValue.split(path.delimiter)) {
-    if (dir.length === 0) continue;
+  const seenDir = new Set<string>();
+  for (const dir of discoveryDirs(env)) {
+    if (dir.length === 0 || seenDir.has(dir)) continue;
+    seenDir.add(dir);
     const candidate = path.join(dir, command);
     try {
       const stat = statSync(candidate);
@@ -258,6 +269,48 @@ function defaultListExecutables(command: string, env: NodeJS.ProcessEnv): string
     }
   }
   return found;
+}
+
+/** Dirs to scan for agent executables: every `env.PATH` entry first, then the
+ *  well-known version-manager / package-manager bin dirs a GUI app's `PATH`
+ *  usually omits. */
+function discoveryDirs(env: NodeJS.ProcessEnv): string[] {
+  const pathValue = env.PATH ?? env.Path ?? "";
+  return [...pathValue.split(path.delimiter), ...wellKnownAgentBinDirs(homedir())];
+}
+
+/** Well-known bin dirs where a CLI installed via a node/JS version manager or
+ *  a per-user package manager lives — even when it isn't on a GUI app's `PATH`.
+ *  Exported for testing; `home` defaults to the user's home dir. */
+export function wellKnownAgentBinDirs(home: string = homedir()): string[] {
+  return [
+    // Every installed nvm node version's bin (the agent may be under any one).
+    ...nvmNodeBinDirs(home),
+    // Other version / package managers.
+    path.join(home, ".volta", "bin"),
+    path.join(home, ".bun", "bin"),
+    path.join(home, ".asdf", "shims"),
+    path.join(home, ".deno", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".npm-global", "bin"),
+    // Common system install prefixes.
+    "/opt/homebrew/bin",
+    "/usr/local/bin"
+  ];
+}
+
+/** Every `~/.nvm/versions/node/<v>/bin` dir, newest-first so the most recent
+ *  node version's install is tried before older ones. Empty when nvm absent. */
+function nvmNodeBinDirs(home: string): string[] {
+  const base = path.join(home, ".nvm", "versions", "node");
+  try {
+    return readdirSync(base)
+      .sort()
+      .reverse()
+      .map((version) => path.join(base, version, "bin"));
+  } catch {
+    return [];
+  }
 }
 
 function ensureArgs(args: string[], ensure: string[] | undefined): string[] {
@@ -276,7 +329,9 @@ function makeDefaultProbe(env: NodeJS.ProcessEnv): LocalAcpAgentProbe {
     return await execFile(command, args, {
       timeout: 5_000,
       maxBuffer: 1024 * 1024,
-      env
+      // Prepend the candidate's own dir so a node-script CLI (e.g. an nvm-
+      // installed `qwen`) finds its sibling `node` during the probe.
+      env: prependCommandDirToPath(command, env)
     });
   };
 }

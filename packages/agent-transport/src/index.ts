@@ -23,6 +23,7 @@ export {
   hydrateProcessEnvFromLoginShell,
   mergeLoginShellEnvIntoEnv,
   resolveInteractiveLoginShellEnv,
+  prependCommandDirToPath,
   type ResolveLoginShellEnvOptions,
   type MergeLoginShellEnvOptions
 } from "./shell-env";

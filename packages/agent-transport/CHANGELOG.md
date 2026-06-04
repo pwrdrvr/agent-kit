@@ -1,5 +1,19 @@
 # @pwrdrvr/agent-transport
 
+## 0.1.4
+
+### Patch Changes
+
+- Discover and run agent CLIs installed by a node/JS version manager. Discovery
+  now scans well-known bin dirs (every `~/.nvm/versions/node/*/bin`, plus volta /
+  bun / asdf / deno / `~/.local/bin` / Homebrew) in addition to `PATH`, so an
+  `npm i -g qwen` under nvm is found even though a GUI app's minimal `PATH`
+  doesn't list it (`wellKnownAgentBinDirs`). And `prependCommandDirToPath`
+  (agent-transport) prepends an absolute command's own directory to `PATH` for
+  both the discovery probe and the agent spawn, so a Node-script CLI
+  (`#!/usr/bin/env node`) finds its sibling `node` — without it, probing/spawning
+  an nvm-installed CLI fails with `env: node: No such file or directory`.
+
 ## 0.1.3
 
 ### Patch Changes

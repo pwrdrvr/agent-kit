@@ -1,8 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   mergeLoginShellEnvIntoEnv,
+  prependCommandDirToPath,
   resolveInteractiveLoginShellEnv
 } from "../src/shell-env";
+
+describe("prependCommandDirToPath", () => {
+  it("prepends an absolute command's dir so its sibling node resolves", () => {
+    const out = prependCommandDirToPath(
+      "/Users/me/.nvm/versions/node/v24.16.0/bin/qwen",
+      { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv
+    );
+    expect(out.PATH).toBe("/Users/me/.nvm/versions/node/v24.16.0/bin:/usr/bin:/bin");
+  });
+
+  it("is a no-op for a bare command name", () => {
+    const env = { PATH: "/usr/bin" } as NodeJS.ProcessEnv;
+    expect(prependCommandDirToPath("qwen", env)).toBe(env);
+  });
+
+  it("does not duplicate a dir already on PATH", () => {
+    const env = { PATH: "/opt/homebrew/bin:/usr/bin" } as NodeJS.ProcessEnv;
+    expect(prependCommandDirToPath("/opt/homebrew/bin/qwen", env)).toBe(env);
+  });
+
+  it("sets PATH to just the dir when there was none", () => {
+    const out = prependCommandDirToPath("/opt/tools/grok", {} as NodeJS.ProcessEnv);
+    expect(out.PATH).toBe("/opt/tools");
+  });
+});
 
 describe("resolveInteractiveLoginShellEnv", () => {
   it("reads the environment from an interactive login shell so rc-managed tools are visible", () => {

@@ -97,6 +97,7 @@ export {
 export {
   discoverLocalAcpAgents,
   discoverLocalAcpAgentInstances,
+  wellKnownAgentBinDirs,
   type DiscoveredAcpAgent,
   type DiscoveredAcpAgentGroup,
   type DiscoveredAcpAgentInstance,
