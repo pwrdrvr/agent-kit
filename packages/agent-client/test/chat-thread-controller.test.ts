@@ -273,6 +273,39 @@ describe("ChatThreadController", () => {
     expect(user?.text).toBe("hello");
   });
 
+  it("commits a failed assistant message carrying the reason on a terminal turn error", async () => {
+    const { controller, client } = makeController();
+    const view = await controller.createThread({ name: "T" });
+    const tid = view.threadId;
+    const { turnId } = await controller.sendMessage({ threadId: tid, text: "hi" });
+
+    client.emit({ kind: "agent_message_delta", threadId: tid, turnId, itemId: "m", delta: "partial" });
+    // willRetry:false — terminal: the controller ends the turn now, no turn_completed.
+    client.emit({ kind: "error", threadId: tid, turnId, message: "rate limited", willRetry: false });
+    await tick();
+
+    const assistant = (await controller.getHistory(tid)).find((m) => m.role === "assistant");
+    expect(assistant?.text).toContain("partial");
+    expect(assistant?.text).toContain("rate limited");
+  });
+
+  it("keeps a retryable turn open and carries the reason to its eventual failure", async () => {
+    const { controller, client } = makeController();
+    const view = await controller.createThread({ name: "T" });
+    const tid = view.threadId;
+    const { turnId } = await controller.sendMessage({ threadId: tid, text: "hi" });
+
+    client.emit({ kind: "error", threadId: tid, turnId, message: "transient", willRetry: true });
+    await tick();
+    expect((await controller.getHistory(tid)).find((m) => m.role === "assistant")).toBeUndefined();
+
+    client.emit({ kind: "turn_completed", threadId: tid, turnId, status: "failed" });
+    await tick();
+    expect((await controller.getHistory(tid)).find((m) => m.role === "assistant")?.text).toContain(
+      "transient"
+    );
+  });
+
   it("createThread persists an index row, prepares a dir, and broadcasts a view", async () => {
     const { controller, client, store, events } = makeController();
     const view = await controller.createThread({ name: "Design notes", anchorId: "cap-1" });

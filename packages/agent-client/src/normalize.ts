@@ -23,6 +23,7 @@ import {
   type NormalizedThreadSettings,
   type NormalizedMessage
 } from "@pwrdrvr/agent-core";
+import { formatCodexTurnError } from "./codex-error";
 import type {
   AgentMessageDeltaNotification,
   DynamicToolCallParams,
@@ -35,6 +36,7 @@ import type {
   ThreadTokenUsage,
   ThreadTokenUsageUpdatedNotification,
   TurnCompletedNotification,
+  TurnError,
   TurnStartedNotification,
   TurnStatus
 } from "@pwrdrvr/codex-app-server-protocol/v2";
@@ -389,7 +391,15 @@ export function normalizeNotification(
     }
     case CODEX_NOTIFICATION_METHODS.error: {
       const p = (params ?? {}) as Record<string, unknown>;
-      const message = typeof p.message === "string" ? p.message : "codex error";
+      // ErrorNotification = { error: TurnError, willRetry, threadId, turnId }.
+      // The authoritative reason rides `error` (a TurnError); format it. Fall
+      // back to a bare `message` string for older/loose shapes.
+      const message =
+        "error" in p
+          ? formatCodexTurnError(p.error as TurnError | null | undefined)
+          : typeof p.message === "string"
+            ? p.message
+            : "codex error";
       const event: Extract<NormalizedThreadEvent, { kind: "error" }> = {
         kind: "error",
         message
@@ -397,6 +407,7 @@ export function normalizeNotification(
       if (typeof p.threadId === "string") event.threadId = p.threadId;
       if (typeof p.turnId === "string") event.turnId = p.turnId;
       if (typeof p.code === "string") event.code = p.code;
+      if (typeof p.willRetry === "boolean") event.willRetry = p.willRetry;
       return event;
     }
     default:

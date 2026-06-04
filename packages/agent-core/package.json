@@ -1,6 +1,6 @@
 {
   "name": "@pwrdrvr/agent-core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Neutral message/thread/tool-call schema and injected interfaces for @pwrdrvr/agent-kit backends.",
   "license": "MIT",
   "author": "PwrDrvr LLC",

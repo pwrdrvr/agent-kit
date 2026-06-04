@@ -40,7 +40,17 @@ export type NormalizedThreadEvent =
   | { kind: "thread_settings"; settings: NormalizedThreadSettings }
   | { kind: "approval_request"; threadId: ThreadId; turnId?: TurnId; approval: NormalizedApprovalRequest }
   | { kind: "turn_completed"; threadId: ThreadId; turnId: TurnId; status: NormalizedTurnStatus }
-  | { kind: "error"; threadId?: ThreadId; turnId?: TurnId; message: string; code?: string };
+  | {
+      kind: "error";
+      threadId?: ThreadId;
+      turnId?: TurnId;
+      message: string;
+      code?: string;
+      /** The backend's own signal that it will re-attempt the turn. When
+       *  `false` the fault is terminal and the controller ends the turn now
+       *  rather than waiting for a `turn_completed` that may never arrive. */
+      willRetry?: boolean;
+    };
 
 export type NormalizedThreadEventKind = NormalizedThreadEvent["kind"];
 

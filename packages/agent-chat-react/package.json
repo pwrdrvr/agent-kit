@@ -1,6 +1,6 @@
 {
   "name": "@pwrdrvr/agent-chat-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Presentational React chat UI for agent-kit: renders agent-core neutral thread shapes and emits user intents. Props in, callbacks out — no IPC, bus, or transport.",
   "license": "MIT",
   "author": "PwrDrvr LLC",

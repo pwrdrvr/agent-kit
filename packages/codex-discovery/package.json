@@ -1,6 +1,6 @@
 {
   "name": "@pwrdrvr/codex-discovery",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Discover local Codex CLI binaries (version-ranked), enumerate auth profiles, and drive login / relogin — Electron-free, host-injected logger + openExternal.",
   "license": "MIT",
   "author": "PwrDrvr LLC",

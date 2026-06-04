@@ -150,6 +150,9 @@ type TurnState<TSettings> = {
   /** Frozen at turn start — a mid-turn settings change can't retro-apply. */
   settingsSnapshot: TSettings;
   tokenUsage: NormalizedTokenUsage | null;
+  /** Set when the backend emits an `error` for this turn. Surfaced in the
+   *  committed (failed) assistant message so the transcript shows WHY. */
+  lastError: string | null;
 };
 
 type ThreadModelState = {
@@ -171,6 +174,23 @@ type JournalMessageEntry = { kind: "message"; message: NormalizedMessage };
 
 const RATE_LIMIT_TURNS = 5;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+
+/** The committed assistant message text. The streamed buffer is always carried
+ *  (a turn can fault after streaming partial text). For a FAILED turn the
+ *  recorded error is appended so the transcript shows WHY it failed — folded
+ *  under the buffer when there's prose, else standing alone. */
+function buildFinalText(
+  status: NormalizedTurnStatus,
+  buffer: string,
+  lastError: string | null
+): string {
+  const errorText =
+    status === "failed" && lastError !== null && lastError.trim().length > 0
+      ? lastError.trim()
+      : null;
+  if (errorText === null) return buffer;
+  return buffer.trim().length > 0 ? `${buffer.trimEnd()}\n\n${errorText}` : errorText;
+}
 
 export class ChatThreadController<TSettings = unknown> {
   private readonly deps: ChatThreadControllerDeps<TSettings>;
@@ -379,7 +399,8 @@ export class ChatThreadController<TSettings = unknown> {
       assistantMessageId,
       buffer: "",
       settingsSnapshot,
-      tokenUsage: null
+      tokenUsage: null,
+      lastError: null
     });
     this.recordTurn(threadId);
     await this.broadcastThreadStatus(threadId, { kind: "streaming", turnId });
@@ -436,9 +457,12 @@ export class ChatThreadController<TSettings = unknown> {
       case "turn_completed":
         void this.onTurnCompleted(event.threadId, event.turnId, event.status);
         return;
+      case "error":
+        void this.onTurnError(event.threadId, event.turnId, event.message, event.willRetry);
+        return;
       default:
         // reasoning_delta / agent_message / tool_call(_update) / plan_update /
-        // turn_started / approval_request / error are handled via the dedicated
+        // turn_started / approval_request are handled via the dedicated
         // tool-call + approval seams or are informational; nothing to commit.
         return;
     }
@@ -465,6 +489,27 @@ export class ChatThreadController<TSettings = unknown> {
     const turn = this.turns.get(threadId);
     if (turn === undefined || turn.turnId !== turnId) return;
     await this.finalizeAssistant(threadId, status);
+  }
+
+  /** The backend faulted a turn. Record the authoritative reason so it lands in
+   *  the committed (failed) assistant message; when terminal (`willRetry` not
+   *  true) end the turn now rather than waiting for a `turn_completed` that may
+   *  never arrive. When the backend says it WILL retry, keep the turn open and
+   *  let the eventual `turn_completed` decide its fate (carrying the reason if it
+   *  ends up failing). */
+  private async onTurnError(
+    threadId: string | undefined,
+    turnId: string | undefined,
+    message: string,
+    willRetry: boolean | undefined
+  ): Promise<void> {
+    if (threadId === undefined || turnId === undefined) return;
+    const turn = this.turns.get(threadId);
+    if (turn === undefined || turn.turnId !== turnId) return;
+    turn.lastError = message;
+    if (willRetry !== true) {
+      await this.finalizeAssistant(threadId, "failed");
+    }
   }
 
   private onTokenUsage(threadId: string, turnId: string, usage: NormalizedTokenUsage): void {
@@ -565,7 +610,7 @@ export class ChatThreadController<TSettings = unknown> {
     const message: NormalizedMessage = {
       id: turn.assistantMessageId,
       role: "assistant",
-      text: turn.buffer,
+      text: buildFinalText(status, turn.buffer, turn.lastError),
       createdAt: this.now()
     };
 
