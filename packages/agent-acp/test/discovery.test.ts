@@ -128,7 +128,7 @@ describe("strategy table extensibility (KTD-A2)", () => {
     expect(threadId).toMatch(/^acp:acme:/);
     const events: NormalizedThreadEvent[] = [];
     client.onEvent((e) => events.push(e));
-    const turn = client.startTurn({ threadId, prompt: "go" });
+    const turn = client.startTurn({ threadId, input: { text: "go" } });
     transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
     transport.finishPrompt();
     await turn;

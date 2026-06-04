@@ -1,9 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import type {
+  AgentBackend,
   AgentBackendApprovalHandler,
+  AgentBackendStartThreadResult,
   AgentBackendToolCall,
   AgentBackendToolCallHandler,
+  AgentStartThreadOptions,
+  AgentStartTurnOptions,
   NormalizedThreadEvent,
   NormalizedThreadRecord,
   NormalizedUsageRecord,
@@ -27,7 +31,8 @@ class FakeBackend {
   eventCb: ((e: NormalizedThreadEvent) => void) | null = null;
   toolCb: AgentBackendToolCallHandler | null = null;
   approvalCb: AgentBackendApprovalHandler | null = null;
-  startTurn = vi.fn(async (_opts: { threadId: string; input: unknown[]; effort?: string }) => ({
+  /** Records the NEUTRAL turn options the controller passed (no Codex/ACP shape). */
+  startTurn = vi.fn(async (_opts: AgentStartTurnOptions) => ({
     turnId: `turn-${++this.turnCounter}`
   }));
   interruptTurn = vi.fn(async (_threadId: string) => undefined);
@@ -68,6 +73,62 @@ class FakeBackend {
     if (this.approvalCb === null) throw new Error("no approval handler");
     return this.approvalCb(method, params);
   }
+}
+
+/**
+ * A neutral `AgentBackend` that RECORDS the options it receives. Two flavors:
+ *   • Codex-like (`hasGitInfo=true`): returns model fields + supports
+ *     clearThreadGitInfo.
+ *   • ACP-like (`hasGitInfo=false`): mints `acp:`-prefixed ids, no model fields,
+ *     omits the optional clearThreadGitInfo (the controller calls it via `?.`).
+ * Both take the SAME neutral options — that's the point of the test.
+ */
+class RecordingBackend implements AgentBackend {
+  startThreadOpts: AgentStartThreadOptions | undefined;
+  startTurnOpts: AgentStartTurnOptions | undefined;
+  lastThreadId = "";
+  clearedGit = false;
+  private counter = 0;
+  // Codex-like instances expose clearThreadGitInfo; ACP-like ones omit it.
+  clearThreadGitInfo?: (threadId: string) => Promise<void>;
+
+  constructor(
+    private readonly prefix: string,
+    hasGitInfo: boolean
+  ) {
+    if (hasGitInfo) {
+      this.clearThreadGitInfo = async (_threadId: string): Promise<void> => {
+        this.clearedGit = true;
+      };
+    }
+  }
+
+  async startThread(options?: AgentStartThreadOptions): Promise<AgentBackendStartThreadResult> {
+    this.startThreadOpts = options;
+    this.lastThreadId = `${this.prefix}:thread-${++this.counter}`;
+    const result: AgentBackendStartThreadResult = { threadId: this.lastThreadId };
+    if (this.prefix === "codex") {
+      result.model = "gpt-5-codex";
+      result.modelProvider = "openai";
+      result.serviceTier = "default";
+    }
+    return result;
+  }
+  async startTurn(options: AgentStartTurnOptions): Promise<{ turnId: string }> {
+    this.startTurnOpts = options;
+    return { turnId: `${this.prefix}:turn-1` };
+  }
+  async interruptTurn(): Promise<void> {}
+  onEvent(): () => void {
+    return () => undefined;
+  }
+  onToolCall(): () => void {
+    return () => undefined;
+  }
+  onApprovalRequest(): () => void {
+    return () => undefined;
+  }
+  async close(): Promise<void> {}
 }
 
 /** Full in-memory ThreadStore covering the expanded persistence surface. */
@@ -443,6 +504,107 @@ describe("ChatThreadController", () => {
     await expect(controller.sendMessage({ threadId: tid, text: "overflow" })).rejects.toThrow(
       /rate limit/
     );
+  });
+
+  it("passes NEUTRAL start/turn options the controller builds (no Codex/ACP shape)", async () => {
+    const { controller, client } = makeController({
+      catalog: [{ name: "echo" } as never],
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      serviceName: "svc",
+      model: "m1",
+      modelProvider: "p1",
+      effort: "high",
+      threadConfig: { foo: "bar" },
+      threadEnvironments: [],
+      buildSystemPrompt: () => "SYSTEM"
+    });
+    const view = await controller.createThread({ name: "T" });
+
+    const startArg = client.startThread.mock.calls[0]?.[0] as AgentStartThreadOptions;
+    // Neutral field names — instructions (not baseInstructions), workspaceRoots
+    // (not runtimeWorkspaceRoots), tools (opaque, not dynamicTools).
+    expect(view.threadId).toBeTruthy();
+    expect(startArg).toMatchObject({
+      instructions: "SYSTEM",
+      cwd: expect.any(String),
+      workspaceRoots: expect.arrayContaining([expect.any(String)]),
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      serviceName: "svc",
+      model: "m1",
+      modelProvider: "p1",
+      config: { foo: "bar" },
+      environments: [],
+      tools: [{ name: "echo" }]
+    });
+    expect("baseInstructions" in startArg).toBe(false);
+    expect("dynamicTools" in startArg).toBe(false);
+
+    await controller.sendMessage({ threadId: view.threadId, text: "hello" });
+    const turnArg = client.startTurn.mock.calls[0]?.[0] as AgentStartTurnOptions;
+    expect(turnArg).toMatchObject({
+      threadId: view.threadId,
+      input: { text: "hello" },
+      reasoning: "high"
+    });
+    expect("effort" in turnArg).toBe(false);
+  });
+
+  it("drives a fake Codex backend AND a fake ACP backend identically", async () => {
+    // Two distinct backends with different native semantics (Codex returns model
+    // fields + clears git info; ACP mints `acp:` ids and has neither). Both
+    // implement the SAME non-generic AgentBackend and MUST receive byte-identical
+    // NEUTRAL options from the controller — proving the controller never branches.
+    const runOne = async (backend: RecordingBackend): Promise<void> => {
+      const store = new MockStore();
+      const controller = new ChatThreadController({
+        client: backend,
+        store,
+        readSettings: async () => ({}),
+        broadcast: () => undefined,
+        buildSystemPrompt: () => "SYS",
+        catalog: [{ name: "echo" } as never],
+        approvalPolicy: "never",
+        model: "m1",
+        effort: "high"
+      });
+      controller.wire();
+      const view = await controller.createThread({ name: "T" });
+      await controller.sendMessage({ threadId: view.threadId, text: "hi" });
+    };
+
+    const codexLike = new RecordingBackend("codex", true);
+    const acpLike = new RecordingBackend("acp", false);
+    await runOne(codexLike);
+    await runOne(acpLike);
+
+    // Strip cwd/workspaceRoots (per-store temp paths differ) before comparing.
+    const stripDirs = (o: AgentStartThreadOptions): AgentStartThreadOptions => {
+      const { cwd: _cwd, workspaceRoots: _roots, ...rest } = o;
+      return rest;
+    };
+    expect(stripDirs(codexLike.startThreadOpts!)).toEqual(stripDirs(acpLike.startThreadOpts!));
+    expect(codexLike.startThreadOpts).toMatchObject({
+      instructions: "SYS",
+      approvalPolicy: "never",
+      model: "m1",
+      tools: [{ name: "echo" }]
+    });
+    // Both backends received the identical neutral turn options.
+    expect(codexLike.startTurnOpts).toEqual({
+      threadId: codexLike.lastThreadId,
+      input: { text: "hi" },
+      reasoning: "high"
+    });
+    expect(acpLike.startTurnOpts).toEqual({
+      threadId: acpLike.lastThreadId,
+      input: { text: "hi" },
+      reasoning: "high"
+    });
+    // The controller drove ACP without knowing it lacks clearThreadGitInfo.
+    expect(codexLike.clearedGit).toBe(true);
+    expect(acpLike.clearedGit).toBe(false);
   });
 
   it("interrupting finalizes the assistant and broadcasts turn_interrupted", async () => {

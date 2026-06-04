@@ -36,6 +36,9 @@ import {
   noopLogger,
   type AgentBackend,
   type AgentBackendToolCall,
+  type AgentStartThreadOptions,
+  type AgentStartTurnOptions,
+  type AgentTurnInput,
   type Logger,
   type NormalizedApprovalDecision,
   type NormalizedApprovalRequest,
@@ -53,16 +56,15 @@ import {
 import type {
   DynamicToolCallParams,
   DynamicToolCallResponse,
-  DynamicToolSpec,
-  UserInput
+  DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
-import type { CodexStartThreadOptions, CodexStartTurnOptions } from "../codex-thread-client";
 
 /** The backend the controller drives. Codex (`CodexThreadClient`) and ACP
- *  (`AcpAgentClient`) both implement `AgentBackend`; the controller passes
- *  Codex-shaped thread/turn options, so a non-Codex backend is wrapped by a thin
- *  host adapter while the neutral event / tool / approval seams stay identical. */
-export type ChatBackend = AgentBackend<CodexStartThreadOptions, CodexStartTurnOptions>;
+ *  (`AcpAgentClient`) both implement the non-generic `AgentBackend`; the
+ *  controller builds NEUTRAL thread/turn options, so any backend drops in
+ *  identically with no per-backend branching. Retained as an alias to
+ *  `AgentBackend` so existing hosts that name `ChatBackend` keep compiling. */
+export type ChatBackend = AgentBackend;
 
 /** Builds the per-thread system prompt (base + host guidance). Injected as
  *  `baseInstructions` at thread/start. Receives the frozen settings snapshot and
@@ -212,25 +214,29 @@ export class ChatThreadController<TSettings = unknown> {
 
     const preparedDir = await this.deps.store.prepareThreadDir(displayName);
 
+    // NEUTRAL thread-open options. Every backend maps these onto its native
+    // protocol internally — the controller never builds a Codex- or ACP-shaped
+    // payload. `tools` is opaque (a Codex backend casts to DynamicToolSpec[];
+    // ACP ignores it).
+    const startOptions: AgentStartThreadOptions = {
+      instructions: baseInstructions,
+      cwd: preparedDir.path,
+      workspaceRoots: [preparedDir.path]
+    };
+    if (this.deps.approvalPolicy !== undefined) startOptions.approvalPolicy = this.deps.approvalPolicy;
+    if (this.deps.sandbox !== undefined) startOptions.sandbox = this.deps.sandbox;
+    if (this.deps.model !== undefined) startOptions.model = this.deps.model;
+    if (this.deps.modelProvider !== undefined) startOptions.modelProvider = this.deps.modelProvider;
+    if (this.deps.serviceName !== undefined) startOptions.serviceName = this.deps.serviceName;
+    if (this.deps.catalog !== undefined) startOptions.tools = this.deps.catalog;
+    if (this.deps.threadConfig !== undefined) startOptions.config = this.deps.threadConfig;
+    if (this.deps.threadEnvironments !== undefined) {
+      startOptions.environments = this.deps.threadEnvironments;
+    }
+
     let started: { threadId: string } & Partial<ThreadModelState>;
     try {
-      started = await this.deps.client.startThread({
-        ...(this.deps.approvalPolicy !== undefined
-          ? { approvalPolicy: this.deps.approvalPolicy }
-          : {}),
-        ...(this.deps.sandbox !== undefined ? { sandbox: this.deps.sandbox } : {}),
-        ...(this.deps.model !== undefined ? { model: this.deps.model } : {}),
-        ...(this.deps.modelProvider !== undefined ? { modelProvider: this.deps.modelProvider } : {}),
-        baseInstructions,
-        cwd: preparedDir.path,
-        runtimeWorkspaceRoots: [preparedDir.path],
-        ...(this.deps.serviceName !== undefined ? { serviceName: this.deps.serviceName } : {}),
-        ...(this.deps.catalog !== undefined ? { dynamicTools: this.deps.catalog } : {}),
-        ...(this.deps.threadConfig !== undefined ? { config: this.deps.threadConfig } : {}),
-        ...(this.deps.threadEnvironments !== undefined
-          ? { environments: this.deps.threadEnvironments }
-          : {})
-      });
+      started = await this.deps.client.startThread(startOptions);
     } catch (cause) {
       await this.deps.store.discardPreparedThreadDir(preparedDir).catch(() => undefined);
       throw cause;
@@ -298,6 +304,10 @@ export class ChatThreadController<TSettings = unknown> {
     threadId: string;
     text: string;
     anchorId?: string | null;
+    /** Local image file paths to attach to this turn. Forwarded neutrally as
+     *  `AgentTurnInput.imagePaths`; the backend maps to its native attachment
+     *  (Codex `localImage`, ACP `image` blocks). */
+    imagePaths?: readonly string[];
   }): Promise<{ turnId: string }> {
     const { threadId } = input;
     if (this.turns.has(threadId)) {
@@ -321,29 +331,31 @@ export class ChatThreadController<TSettings = unknown> {
 
     const settingsSnapshot = await this.deps.readSettings();
 
-    // Per-turn active-context goes in a SEPARATE leading turn item, explicitly
-    // framed as system-generated and NOT folded into the user's text. It's
-    // emitted only for the CURRENT turn (never accumulated) so the thread carries
-    // no stale context blocks, and the static baseInstructions stays byte-
-    // identical across turns so Codex can prompt-cache it.
+    // Per-turn active-context is prepended to the turn text as a leading,
+    // explicitly system-framed block — separated from the user's text by a blank
+    // line, NOT silently merged into the prose. It's emitted only for the CURRENT
+    // turn (never accumulated) so the thread carries no stale context blocks, and
+    // the static instructions stay byte-identical across turns so the backend can
+    // prompt-cache them. The neutral `AgentTurnInput` carries a single text field,
+    // so the context rides as a labeled preamble rather than a separate protocol
+    // item.
     const anchorForTurn = input.anchorId ?? (await this.currentAnchor(threadId));
-    const turnInput: UserInput[] = [];
+    let turnText = input.text;
     if (anchorForTurn !== null && this.deps.buildTurnContext !== undefined) {
-      turnInput.push({
-        type: "text",
-        text: this.deps.buildTurnContext(anchorForTurn),
-        text_elements: []
-      });
+      turnText = `${this.deps.buildTurnContext(anchorForTurn)}\n\n${input.text}`;
     }
-    turnInput.push({ type: "text", text: input.text, text_elements: [] });
+    const turnInput: AgentTurnInput = { text: turnText };
+    if (input.imagePaths !== undefined) turnInput.imagePaths = input.imagePaths;
+
+    const startTurnOptions: AgentStartTurnOptions = {
+      threadId,
+      input: turnInput,
+      reasoning: this.deps.effort ?? "medium"
+    };
 
     let turnId: string;
     try {
-      const started = await this.deps.client.startTurn({
-        threadId,
-        input: turnInput,
-        effort: this.deps.effort ?? "medium"
-      });
+      const started = await this.deps.client.startTurn(startTurnOptions);
       turnId = started.turnId;
     } catch (cause) {
       // Mark a placeholder assistant message failed so the UI shows Retry.

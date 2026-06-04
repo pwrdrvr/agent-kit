@@ -27,7 +27,7 @@ describe("AcpAgentClient — lifecycle", () => {
     const events: NormalizedThreadEvent[] = [];
     client.onEvent((event) => events.push(event));
 
-    const turnPromise = client.startTurn({ threadId, prompt: "hello" });
+    const turnPromise = client.startTurn({ threadId, input: { text: "hello" } });
     // The agent streams an assistant chunk, then the prompt resolves.
     transport.emitSessionUpdate("session-1", {
       sessionUpdate: "agent_message_chunk",
@@ -119,7 +119,7 @@ describe("AcpAgentClient — lifecycle", () => {
     const client = makeClient(transport);
     const { threadId } = await client.startThread();
 
-    const turnPromise = client.startTurn({ threadId, prompt: "long task" });
+    const turnPromise = client.startTurn({ threadId, input: { text: "long task" } });
     expect(transport.hasPendingPrompt()).toBe(true);
 
     await client.interruptTurn(threadId);
@@ -135,7 +135,7 @@ describe("AcpAgentClient — lifecycle", () => {
     // Subsequent session/update keyed on the snake_case id routes correctly.
     const events: NormalizedThreadEvent[] = [];
     client.onEvent((e) => events.push(e));
-    const turn = client.startTurn({ threadId, prompt: "x" });
+    const turn = client.startTurn({ threadId, input: { text: "x" } });
     transport.emitSessionUpdate("snake-session", {
       session_update: "agent_message_chunk",
       content: { type: "text", text: "routed" }
@@ -166,8 +166,8 @@ describe("AcpAgentClient — lifecycle", () => {
     const transport = new FakeAcpAgentTransport();
     const client = makeClient(transport);
     const { threadId } = await client.startThread();
-    const turn = client.startTurn({ threadId, prompt: "first" });
-    await expect(client.startTurn({ threadId, prompt: "second" })).rejects.toThrow(
+    const turn = client.startTurn({ threadId, input: { text: "first" } });
+    await expect(client.startTurn({ threadId, input: { text: "second" } })).rejects.toThrow(
       /already active/
     );
     transport.finishPrompt();

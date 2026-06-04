@@ -80,23 +80,22 @@ async function main(): Promise<void> {
     }
   });
 
-  // 4. Start a thread with the tool registered.
+  // 4. Start a thread with the tool registered. `tools` is the NEUTRAL,
+  //    backend-agnostic catalog slot — a Codex backend casts it to
+  //    DynamicToolSpec[]; an ACP backend would ignore it.
   const thread = await client.startThread({
-    dynamicTools: buildToolCatalog(catalog)
+    tools: buildToolCatalog(catalog)
   });
   console.log(`Connected. thread=${thread.threadId} model=${thread.model}\n`);
   console.log("--- assistant ---");
 
-  // 5. Run a turn that should invoke the tool.
+  // 5. Run a turn that should invoke the tool. The NEUTRAL turn input is plain
+  //    text (plus optional imagePaths) — the backend builds its native content.
   await client.startTurn({
     threadId: thread.threadId,
-    input: [
-      {
-        type: "text",
-        text: "What is the current time? Call the get_current_time tool, then tell me the time in one short sentence.",
-        text_elements: []
-      }
-    ]
+    input: {
+      text: "What is the current time? Call the get_current_time tool, then tell me the time in one short sentence."
+    }
   });
 
   const status = await turnComplete;

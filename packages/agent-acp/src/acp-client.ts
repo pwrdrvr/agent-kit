@@ -21,6 +21,8 @@ import {
   type AgentBackendStartThreadResult,
   type AgentBackendToolCall,
   type AgentBackendToolCallHandler,
+  type AgentStartThreadOptions,
+  type AgentStartTurnOptions,
   type Logger,
   type NormalizedApprovalDecision,
   type NormalizedApprovalRequest,
@@ -28,6 +30,8 @@ import {
   type NormalizedThreadSettings,
   type Unsubscribe
 } from "@pwrdrvr/agent-core";
+import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
 import type { JsonRpcId } from "@pwrdrvr/agent-transport";
 import type { AcpAgentStrategy } from "./strategies/strategy-types";
 import {
@@ -80,12 +84,19 @@ export type AcpAgentClientOptions = {
   logger?: Logger;
 };
 
+/** ACP-NATIVE thread/start options. **No longer the public `startThread`
+ *  surface** — `AcpAgentClient` implements the non-generic `AgentBackend` and its
+ *  public `startThread` takes neutral `AgentStartThreadOptions`. Retained as the
+ *  internal mapping target and exposed via `startThreadNative` for hosts wanting
+ *  ACP-specific control (e.g. per-thread `mcpServers`). */
 export type AcpStartThreadOptions = {
   /** Working directory for the agent session. */
   cwd?: string;
   mcpServers?: AcpMcpServerConfig[];
 };
 
+/** ACP-NATIVE turn/start options. Internal mapping target; the public `startTurn`
+ *  takes neutral `AgentStartTurnOptions`. */
 export type AcpStartTurnOptions = {
   threadId: string;
   /** Plain prompt text. */
@@ -129,7 +140,7 @@ function permissionDecisionToken(decision: NormalizedApprovalDecision): string {
   }
 }
 
-export class AcpAgentClient implements AgentBackend<AcpStartThreadOptions, AcpStartTurnOptions> {
+export class AcpAgentClient implements AgentBackend {
   private readonly transport: AcpJsonRpcTransport;
   private readonly strategy: AcpAgentStrategy;
   private readonly now: () => number;
@@ -212,7 +223,60 @@ export class AcpAgentClient implements AgentBackend<AcpStartThreadOptions, AcpSt
 
   // ---- lifecycle ----
 
+  /**
+   * Public `AgentBackend.startThread`: accepts NEUTRAL `AgentStartThreadOptions`
+   * and maps them onto an ACP `session/new`. ACP supports:
+   *   • `cwd` → `session/new.cwd`.
+   *   • `model` → applied via `session/set_model` after the session opens, when
+   *     the agent advertises model selection (best-effort; debug-logged if not).
+   *   • `instructions` is NOT injected here — ACP `session/new` has no base-
+   *     instructions slot, matching the adapter's existing behavior. A host that
+   *     wants system framing sends it as leading turn text.
+   * Codex-only fields (`approvalPolicy`, `sandbox`, `config`, `environments`,
+   * `tools`, `serviceName`, `modelProvider`, `serviceTier`, `workspaceRoots`) are
+   * IGNORED — logged at debug so it's visible the backend doesn't honor them.
+   */
   async startThread(
+    options: AgentStartThreadOptions = {}
+  ): Promise<AgentBackendStartThreadResult> {
+    const ignored: string[] = [];
+    for (const key of [
+      "instructions",
+      "approvalPolicy",
+      "sandbox",
+      "config",
+      "environments",
+      "tools",
+      "serviceName",
+      "modelProvider",
+      "serviceTier",
+      "workspaceRoots"
+    ] as const) {
+      if (options[key] !== undefined) ignored.push(key);
+    }
+    if (ignored.length > 0) {
+      this.logger.debug("acp startThread: ignoring Codex-only neutral options", {
+        ignored
+      });
+    }
+    const native: AcpStartThreadOptions = {};
+    if (options.cwd !== undefined) native.cwd = options.cwd;
+    const result = await this.startThreadNative(native);
+    if (options.model !== undefined) {
+      await this.setModel(result.threadId, options.model).catch((cause) => {
+        this.logger.debug("acp startThread: model selection not applied", {
+          model: options.model,
+          message: cause instanceof Error ? cause.message : String(cause)
+        });
+      });
+    }
+    return result;
+  }
+
+  /** ACP-native `session/new`. The neutral `startThread` delegates here after
+   *  mapping cwd + dropping Codex-only fields. Exposed for hosts that need
+   *  ACP-specific control (per-thread `mcpServers`). */
+  async startThreadNative(
     options: AcpStartThreadOptions = {}
   ): Promise<AgentBackendStartThreadResult> {
     await this.initialize();
@@ -258,7 +322,42 @@ export class AcpAgentClient implements AgentBackend<AcpStartThreadOptions, AcpSt
     return out;
   }
 
-  async startTurn(options: AcpStartTurnOptions): Promise<{ turnId: string }> {
+  /**
+   * Public `AgentBackend.startTurn`: accepts NEUTRAL `AgentStartTurnOptions` and
+   * maps them onto ACP prompt content blocks — a leading `text` block from
+   * `input.text`, then one `image` block per `input.imagePaths` entry (read from
+   * disk, base64-encoded, mimeType inferred from extension). `reasoning` maps to
+   * an ACP mode/config when the session advertises a matching option, else it is
+   * IGNORED (debug-logged).
+   */
+  async startTurn(options: AgentStartTurnOptions): Promise<{ turnId: string }> {
+    const promptContent: AcpPromptContentBlock[] = [
+      { type: "text", text: options.input.text }
+    ];
+    for (const imagePath of options.input.imagePaths ?? []) {
+      const block = await this.imageBlockFromPath(imagePath).catch((cause) => {
+        this.logger.debug("acp startTurn: skipping unreadable image", {
+          imagePath,
+          message: cause instanceof Error ? cause.message : String(cause)
+        });
+        return undefined;
+      });
+      if (block !== undefined) promptContent.push(block);
+    }
+    if (options.reasoning !== undefined) {
+      await this.applyReasoning(options.threadId, options.reasoning).catch((cause) => {
+        this.logger.debug("acp startTurn: reasoning not applied", {
+          reasoning: options.reasoning,
+          message: cause instanceof Error ? cause.message : String(cause)
+        });
+      });
+    }
+    return this.startTurnNative({ threadId: options.threadId, promptContent });
+  }
+
+  /** ACP-native `session/prompt`. Takes a plain prompt or pre-built content
+   *  blocks. The neutral `startTurn` delegates here after building blocks. */
+  async startTurnNative(options: AcpStartTurnOptions): Promise<{ turnId: string }> {
     const session = this.requireSession(options.threadId);
     if (session.turnId !== undefined) {
       throw new Error("A turn is already active for this ACP session.");
@@ -554,6 +653,36 @@ export class AcpAgentClient implements AgentBackend<AcpStartThreadOptions, AcpSt
     });
   }
 
+  /** Map a neutral `reasoning` token onto an ACP runtime option. We try to match
+   *  it to an available MODE (by id or label, case-insensitively) and switch via
+   *  `session/set_mode`. ACP has no first-class "reasoning effort" concept, so if
+   *  no mode matches we leave it alone — the caller's `.catch` debug-logs. */
+  private async applyReasoning(threadId: string, reasoning: string): Promise<void> {
+    const modes = this.runtimeCapabilities?.modes?.availableModes ?? [];
+    const target = reasoning.toLowerCase();
+    const match = modes.find(
+      (mode) =>
+        mode.id.toLowerCase() === target ||
+        (typeof mode.label === "string" && mode.label.toLowerCase() === target)
+    );
+    if (match === undefined) {
+      this.logger.debug("acp reasoning has no matching mode — ignored", { reasoning });
+      return;
+    }
+    await this.setMode(threadId, match.id);
+  }
+
+  /** Read an image file and build an ACP `image` content block (base64 + inferred
+   *  mimeType). Throws on read failure; the caller catches + skips. */
+  private async imageBlockFromPath(imagePath: string): Promise<AcpPromptContentBlock> {
+    const data = await readFile(imagePath);
+    return {
+      type: "image",
+      mimeType: mimeTypeForImagePath(imagePath),
+      data: data.toString("base64")
+    };
+  }
+
   private captureRuntimeCapabilities(
     source: AcpRuntimeCapabilities["source"],
     result: unknown
@@ -734,6 +863,26 @@ function selectPermissionOptionId(
 
 function textPrompt(text: string): AcpPromptContentBlock[] {
   return [{ type: "text", text }];
+}
+
+/** Best-effort image mimeType from a file extension. Falls back to PNG. */
+function mimeTypeForImagePath(imagePath: string): string {
+  switch (extname(imagePath).toLowerCase()) {
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".bmp":
+      return "image/bmp";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+    default:
+      return "image/png";
+  }
 }
 
 function errorMessage(error: unknown): string {

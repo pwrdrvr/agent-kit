@@ -20,6 +20,8 @@ import {
   type AgentBackendStartThreadResult,
   type AgentBackendToolCall,
   type AgentBackendToolCallHandler,
+  type AgentStartThreadOptions,
+  type AgentStartTurnOptions,
   type Logger,
   type NormalizedThreadEvent,
   type NormalizedApprovalDecision
@@ -78,6 +80,14 @@ export type CodexThreadClientOptions = {
   logger?: Logger;
 };
 
+/**
+ * Codex-NATIVE thread/start options. **No longer the public `startThread`
+ * surface** — `CodexThreadClient` now implements the non-generic `AgentBackend`
+ * and its public `startThread` takes neutral `AgentStartThreadOptions`. This
+ * type is retained as the internal mapping target (and is still exported for
+ * hosts that want to construct the native shape directly via
+ * `startThreadNative`). The neutral→native mapping lives in `startThread`.
+ */
 export type CodexStartThreadOptions = {
   approvalPolicy?: string;
   sandbox?: string;
@@ -104,6 +114,9 @@ export type CodexStartThreadOptions = {
   environments?: unknown[];
 };
 
+/** Codex-NATIVE turn/start options. Internal mapping target (see
+ *  `startThreadNative`'s sibling `startTurnNative`); the public `startTurn`
+ *  takes neutral `AgentStartTurnOptions`. */
 export type CodexStartTurnOptions = {
   threadId: string;
   input: UserInput[];
@@ -150,9 +163,7 @@ function approvalResponseFor(decision: NormalizedApprovalDecision): unknown {
   }
 }
 
-export class CodexThreadClient
-  implements AgentBackend<CodexStartThreadOptions, CodexStartTurnOptions>
-{
+export class CodexThreadClient implements AgentBackend {
   private readonly requestTimeoutMs: number;
   private readonly turnTimeoutMs: number;
   private readonly logger: Logger;
@@ -198,7 +209,38 @@ export class CodexThreadClient
     };
   }
 
-  async startThread(opts: CodexStartThreadOptions = {}): Promise<StartThreadResult> {
+  /**
+   * Public `AgentBackend.startThread`: accepts NEUTRAL `AgentStartThreadOptions`
+   * and maps them onto Codex-native `CodexStartThreadOptions` before delegating
+   * to `startThreadNative`. Mapping:
+   *   instructions→baseInstructions, cwd, workspaceRoots→runtimeWorkspaceRoots,
+   *   model/modelProvider, serviceTier (drop `null`), approvalPolicy, sandbox,
+   *   serviceName, config, environments, tools (cast to DynamicToolSpec[])→
+   *   dynamicTools.
+   */
+  async startThread(opts: AgentStartThreadOptions = {}): Promise<StartThreadResult> {
+    const native: CodexStartThreadOptions = {};
+    if (opts.instructions !== undefined) native.baseInstructions = opts.instructions;
+    if (opts.cwd !== undefined) native.cwd = opts.cwd;
+    if (opts.workspaceRoots !== undefined) {
+      native.runtimeWorkspaceRoots = [...opts.workspaceRoots];
+    }
+    if (opts.model !== undefined) native.model = opts.model;
+    if (opts.modelProvider !== undefined) native.modelProvider = opts.modelProvider;
+    // Codex's serviceTier is a plain string; a neutral `null` means "don't pin".
+    if (opts.serviceTier != null) native.serviceTier = opts.serviceTier;
+    if (opts.approvalPolicy !== undefined) native.approvalPolicy = opts.approvalPolicy;
+    if (opts.sandbox !== undefined) native.sandbox = opts.sandbox;
+    if (opts.serviceName !== undefined) native.serviceName = opts.serviceName;
+    if (opts.config !== undefined) native.config = opts.config;
+    if (opts.environments !== undefined) native.environments = opts.environments;
+    if (opts.tools !== undefined) native.dynamicTools = opts.tools as DynamicToolSpec[];
+    return this.startThreadNative(native);
+  }
+
+  /** Codex-native thread/start. Builds `ThreadStartParams` directly. Exposed for
+   *  hosts that want full Codex control; the neutral `startThread` delegates here. */
+  async startThreadNative(opts: CodexStartThreadOptions = {}): Promise<StartThreadResult> {
     const connection = await this.getConnection();
     await this.initialize();
 
@@ -274,7 +316,26 @@ export class CodexThreadClient
     );
   }
 
-  async startTurn(opts: CodexStartTurnOptions): Promise<{ turnId: string }> {
+  /**
+   * Public `AgentBackend.startTurn`: accepts NEUTRAL `AgentStartTurnOptions` and
+   * maps them onto Codex-native `UserInput[]`. The neutral `input.text` becomes a
+   * leading `{ type: "text" }` item; each `input.imagePaths` entry becomes a
+   * `{ type: "localImage", path }` item appended after the text. `reasoning`
+   * maps to Codex's `effort`.
+   */
+  async startTurn(opts: AgentStartTurnOptions): Promise<{ turnId: string }> {
+    const input: UserInput[] = [{ type: "text", text: opts.input.text, text_elements: [] }];
+    for (const path of opts.input.imagePaths ?? []) {
+      input.push({ type: "localImage", path });
+    }
+    const native: CodexStartTurnOptions = { threadId: opts.threadId, input };
+    if (opts.reasoning !== undefined) native.effort = opts.reasoning;
+    return this.startTurnNative(native);
+  }
+
+  /** Codex-native turn/start. Takes pre-built `UserInput[]`. The neutral
+   *  `startTurn` delegates here after mapping text + image paths. */
+  async startTurnNative(opts: CodexStartTurnOptions): Promise<{ turnId: string }> {
     await this.resumeThread(opts.threadId);
     const connection = await this.getConnection();
     await this.initialize();

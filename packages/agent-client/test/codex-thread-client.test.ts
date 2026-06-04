@@ -86,13 +86,13 @@ describe("CodexThreadClient", () => {
     const events: NormalizedThreadEvent[] = [];
     client.onEvent((e) => events.push(e));
 
-    const started = await client.startThread({ baseInstructions: "be terse" });
+    const started = await client.startThread({ instructions: "be terse" });
     expect(started.threadId).toBe("thread-1");
     expect(started.model).toBe("gpt-5-codex");
 
     const { turnId } = await client.startTurn({
       threadId: started.threadId,
-      input: [{ type: "text", text: "hi", text_elements: [] }]
+      input: { text: "hi" }
     });
     expect(turnId).toBe("turn-1");
 
@@ -167,11 +167,11 @@ describe("CodexThreadClient", () => {
 
     const ta = await client.startTurn({
       threadId: a.threadId,
-      input: [{ type: "text", text: "a", text_elements: [] }]
+      input: { text: "a" }
     });
     const tb = await client.startTurn({
       threadId: b.threadId,
-      input: [{ type: "text", text: "b", text_elements: [] }]
+      input: { text: "b" }
     });
 
     fake.notify(CODEX_NOTIFICATION_METHODS.agentMessageDelta, {
@@ -190,5 +190,63 @@ describe("CodexThreadClient", () => {
 
     expect(byThread.get(a.threadId)).toBe("AAA");
     expect(byThread.get(b.threadId)).toBe("BBB");
+  });
+
+  it("maps NEUTRAL start/turn options onto Codex-native params", async () => {
+    const fake = new FakeTransport();
+    const client = new CodexThreadClient({ transportFactory: () => fake });
+
+    await client.startThread({
+      instructions: "be terse",
+      cwd: "/work",
+      workspaceRoots: ["/work"],
+      model: "gpt-5-codex",
+      modelProvider: "openai",
+      serviceTier: null,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      serviceName: "demo",
+      config: { foo: "bar" },
+      environments: [],
+      tools: [{ name: "echo" }]
+    });
+
+    const startParams = fake.sent.find((e) => e.method === "thread/start")?.params as Record<
+      string,
+      unknown
+    >;
+    // instructions→baseInstructions, workspaceRoots→runtimeWorkspaceRoots,
+    // tools→dynamicTools; serviceTier:null is dropped (Codex "don't pin").
+    expect(startParams.baseInstructions).toBe("be terse");
+    expect(startParams.cwd).toBe("/work");
+    expect(startParams.runtimeWorkspaceRoots).toEqual(["/work"]);
+    expect(startParams.model).toBe("gpt-5-codex");
+    expect(startParams.modelProvider).toBe("openai");
+    expect("serviceTier" in startParams).toBe(false);
+    expect(startParams.approvalPolicy).toBe("never");
+    expect(startParams.sandbox).toBe("read-only");
+    expect(startParams.serviceName).toBe("demo");
+    expect(startParams.config).toEqual({ foo: "bar" });
+    expect(startParams.environments).toEqual([]);
+    expect(startParams.dynamicTools).toEqual([{ name: "echo" }]);
+
+    await client.startTurn({
+      threadId: "thread-1",
+      input: { text: "hi", imagePaths: ["/a.png", "/b.jpg"] },
+      reasoning: "high"
+    });
+    const turnParams = fake.sent.find((e) => e.method === "turn/start")?.params as Record<
+      string,
+      unknown
+    >;
+    // input.text→leading text item; each imagePath→localImage; reasoning→effort.
+    expect(turnParams.input).toEqual([
+      { type: "text", text: "hi", text_elements: [] },
+      { type: "localImage", path: "/a.png" },
+      { type: "localImage", path: "/b.jpg" }
+    ]);
+    expect(turnParams.effort).toBe("high");
+
+    await client.close();
   });
 });
