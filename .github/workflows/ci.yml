@@ -27,6 +27,12 @@ jobs:
       - name: License policy
         run: pnpm lint:licenses
 
+      # Enforce the layered package graph: no cycles, agent-core + agent-chat-react
+      # stay browser-safe (no node: builtins), and each package only reaches its
+      # allowed siblings. Runs on source, no build needed.
+      - name: Dependency boundaries
+        run: pnpm lint:boundaries
+
       # Build first: packages typecheck against each other's emitted .d.ts
       # (e.g. agent-transport imports @pwrdrvr/agent-core), so dist/ must exist
       # before typecheck. pnpm -r build runs in topological (deps-first) order.
