@@ -96,7 +96,12 @@ export {
 
 export {
   discoverLocalAcpAgents,
+  discoverLocalAcpAgentInstances,
   type DiscoveredAcpAgent,
+  type DiscoveredAcpAgentGroup,
+  type DiscoveredAcpAgentInstance,
+  type AcpAgentInstanceSource,
+  type AcpPathExecutableLister,
   type LocalAcpDiscoveryOptions
 } from "./discovery/acp-local-discovery";
 

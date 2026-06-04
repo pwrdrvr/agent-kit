@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { NormalizedThreadEvent } from "@pwrdrvr/agent-core";
 import {
   discoverLocalAcpAgents,
+  discoverLocalAcpAgentInstances,
+  type AcpPathExecutableLister,
   type LocalAcpAgentProbe
 } from "../src/discovery/acp-local-discovery";
 import { BUILT_IN_ACP_STRATEGIES } from "../src/strategies/index";
@@ -30,13 +32,20 @@ function scriptedProbe(
   };
 }
 
+/** Hermetic PATH lister: never touches the real machine's PATH. Tests that
+ *  want PATH matches return them explicitly via `listFrom`. */
+const noPathScan: AcpPathExecutableLister = () => [];
+function listFrom(table: Record<string, string[]>): AcpPathExecutableLister {
+  return (command) => table[command] ?? [];
+}
+
 describe("discoverLocalAcpAgents — strategy-driven", () => {
   it("discovers exactly the installed agents (Gemini + Grok)", async () => {
     const probe = scriptedProbe({
       gemini: { version: "0.4.1", help: "usage\n  --acp  run as ACP server" },
       grok: { version: "1.2.0", help: "Run the agent over stdio" }
     });
-    const agents = await discoverLocalAcpAgents({ probe, now: () => 42 });
+    const agents = await discoverLocalAcpAgents({ probe, now: () => 42, listExecutables: noPathScan });
     expect(agents.map((a) => a.strategyId).sort()).toEqual(["gemini", "grok"]);
     const gemini = agents.find((a) => a.strategyId === "gemini")!;
     expect(gemini.command).toBe("gemini");
@@ -53,7 +62,7 @@ describe("discoverLocalAcpAgents — strategy-driven", () => {
         help: "kimi acp — start the ACP server\nOther flags: --foo --bar"
       }
     });
-    const agents = await discoverLocalAcpAgents({ probe });
+    const agents = await discoverLocalAcpAgents({ probe, listExecutables: noPathScan });
     expect(agents.map((a) => a.strategyId)).toEqual(["kimi"]);
     expect(agents[0]?.args).toEqual(["acp"]);
   });
@@ -62,9 +71,76 @@ describe("discoverLocalAcpAgents — strategy-driven", () => {
     const probe = scriptedProbe({
       "/opt/homebrew/bin/grok": { version: "1.0.0", help: "Run the agent over stdio" }
     });
-    const agents = await discoverLocalAcpAgents({ probe });
+    const agents = await discoverLocalAcpAgents({ probe, listExecutables: noPathScan });
     expect(agents).toHaveLength(1);
     expect(agents[0]?.command).toBe("/opt/homebrew/bin/grok");
+  });
+});
+
+describe("discoverLocalAcpAgentInstances — every installed instance", () => {
+  it("returns ALL PATH matches of an agent, each with its own version + source", async () => {
+    const nvmQwen = "/Users/me/.nvm/versions/node/v24.16.0/bin/qwen";
+    const brewQwen = "/opt/homebrew/bin/qwen";
+    const probe = scriptedProbe({
+      [nvmQwen]: { version: "0.16.1", help: "flags: --acp run ACP server" },
+      [brewQwen]: { version: "0.15.0", help: "flags: --acp run ACP server" }
+    });
+    const groups = await discoverLocalAcpAgentInstances({
+      probe,
+      now: () => 7,
+      listExecutables: listFrom({ qwen: [nvmQwen, brewQwen] })
+    });
+    const qwen = groups.find((g) => g.strategyId === "qwen")!;
+    expect(qwen.instances).toEqual([
+      { command: nvmQwen, version: "0.16.1", source: "path" },
+      { command: brewQwen, version: "0.15.0", source: "path" }
+    ]);
+    expect(qwen.args).toEqual(["--acp"]);
+    expect(qwen.discoveredAt).toBe(7);
+  });
+
+  it("orders candidates override → PATH → fallback and dedups by command", async () => {
+    const override = "/custom/grok";
+    const pathGrok = "/usr/local/bin/grok";
+    const probe = scriptedProbe({
+      [override]: { version: "9.0.0", help: "Run the agent over stdio" },
+      [pathGrok]: { version: "1.2.0", help: "Run the agent over stdio" },
+      // ~/.grok/bin/grok fallback NOT installed → not in the map
+      "/opt/homebrew/bin/grok": { version: "1.1.0", help: "Run the agent over stdio" }
+    });
+    const groups = await discoverLocalAcpAgentInstances({
+      probe,
+      overrides: { grok: override },
+      listExecutables: listFrom({ grok: [pathGrok] })
+    });
+    const grok = groups.find((g) => g.strategyId === "grok")!;
+    expect(grok.instances.map((i) => ({ command: i.command, source: i.source }))).toEqual([
+      { command: override, source: "override" },
+      { command: pathGrok, source: "path" },
+      { command: "/opt/homebrew/bin/grok", source: "fallback" }
+    ]);
+  });
+
+  it("legacy discoverLocalAcpAgents returns the FIRST instance of each group", async () => {
+    const nvmQwen = "/Users/me/.nvm/versions/node/v24.16.0/bin/qwen";
+    const brewQwen = "/opt/homebrew/bin/qwen";
+    const probe = scriptedProbe({
+      [nvmQwen]: { version: "0.16.1", help: "flags: --acp" },
+      [brewQwen]: { version: "0.15.0", help: "flags: --acp" }
+    });
+    const agents = await discoverLocalAcpAgents({
+      probe,
+      listExecutables: listFrom({ qwen: [nvmQwen, brewQwen] })
+    });
+    const qwen = agents.find((a) => a.strategyId === "qwen")!;
+    expect(qwen.command).toBe(nvmQwen);
+    expect(qwen.version).toBe("0.16.1");
+  });
+
+  it("omits an agent with no passing instance", async () => {
+    const probe = scriptedProbe({});
+    const groups = await discoverLocalAcpAgentInstances({ probe, listExecutables: noPathScan });
+    expect(groups).toEqual([]);
   });
 });
 
@@ -91,6 +167,7 @@ describe("strategy table extensibility (KTD-A2)", () => {
     });
     const agents = await discoverLocalAcpAgents({
       probe,
+      listExecutables: noPathScan,
       strategies: [...BUILT_IN_ACP_STRATEGIES, acmeStrategy]
     });
     const acme = agents.find((a) => a.strategyId === "acme");

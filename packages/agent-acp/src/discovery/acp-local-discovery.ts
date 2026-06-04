@@ -2,10 +2,20 @@
 // strategy table and runs each strategy's `discoveryProbe`. Adding a 5th agent
 // (a new strategy entry) surfaces it through discovery with ZERO changes here.
 //
+// Two granularities:
+//   • `discoverLocalAcpAgentInstances` — returns EVERY installed instance of
+//     each agent (each executable on `PATH` + the strategy's fallback paths +
+//     an optional override that passes the probe), with its parsed version and
+//     where it was found. A host UI can list them all and let the user pick.
+//   • `discoverLocalAcpAgents` — the original first-match-per-agent view, kept
+//     for back-compat. Implemented on top of the instance view.
+//
 // Ported from PwrAgnt acp-local-discovery.ts, generalized so the per-agent probe
 // details live in the strategy, not inline branches.
 
 import { execFile as execFileCallback } from "node:child_process";
+import { realpathSync, statSync } from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import { BUILT_IN_ACP_STRATEGIES } from "../strategies/index";
 import type {
@@ -18,6 +28,33 @@ import type {
 const execFile = promisify(execFileCallback);
 
 export type { LocalAcpAgentProbe, LocalAcpProbeResult } from "../strategies/strategy-types";
+
+/** How a discovered instance's executable path was located. */
+export type AcpAgentInstanceSource = "override" | "path" | "fallback";
+
+/** One installed executable of an agent that passed the probe. */
+export type DiscoveredAcpAgentInstance = {
+  /** Resolved command/path that passed the probe. */
+  command: string;
+  /** Parsed CLI version, when the version probe yielded one. */
+  version?: string;
+  /** Where this candidate came from (user override, `PATH`, or a fallback path). */
+  source: AcpAgentInstanceSource;
+};
+
+/** Every installed instance of one agent found on this machine. */
+export type DiscoveredAcpAgentGroup = {
+  strategyId: string;
+  backendId: string;
+  name: string;
+  /** Spawn args that put it into ACP stdio mode (same for every instance). */
+  args: string[];
+  /** Extra env to set at launch (same for every instance). */
+  env: Record<string, string>;
+  /** All instances that passed the probe, in candidate order (override → PATH → fallback). */
+  instances: DiscoveredAcpAgentInstance[];
+  discoveredAt: number;
+};
 
 export type DiscoveredAcpAgent = {
   strategyId: string;
@@ -33,6 +70,13 @@ export type DiscoveredAcpAgent = {
   discoveredAt: number;
 };
 
+/** Lists every executable named `command` across the dirs in `env.PATH`,
+ *  in `PATH` order (the `which -a` view). */
+export type AcpPathExecutableLister = (
+  command: string,
+  env: NodeJS.ProcessEnv
+) => string[];
+
 export type LocalAcpDiscoveryOptions = {
   probe?: LocalAcpAgentProbe;
   now?: () => number;
@@ -40,33 +84,79 @@ export type LocalAcpDiscoveryOptions = {
   strategies?: readonly AcpAgentStrategy[];
   /** Per-strategy command override (tried before the strategy's own candidates). */
   overrides?: Record<string, string>;
+  /** Env used both for PATH enumeration and (by the default probe) for spawns. */
+  env?: NodeJS.ProcessEnv;
+  /** Injectable `PATH` executable lister (real-fs scan by default). */
+  listExecutables?: AcpPathExecutableLister;
 };
 
+/**
+ * Discover every installed instance of each agent (all `PATH` matches +
+ * fallbacks + override that pass the probe), grouped per strategy. Groups with
+ * no passing instance are omitted.
+ */
+export async function discoverLocalAcpAgentInstances(
+  options: LocalAcpDiscoveryOptions = {}
+): Promise<DiscoveredAcpAgentGroup[]> {
+  const strategies = options.strategies ?? BUILT_IN_ACP_STRATEGIES;
+  const env = options.env ?? process.env;
+  const probe = options.probe ?? makeDefaultProbe(env);
+  const listExecutables = options.listExecutables ?? defaultListExecutables;
+  const now = options.now ?? Date.now;
+  const groups = await Promise.all(
+    strategies.map((strategy) =>
+      discoverStrategyInstances(
+        strategy,
+        probe,
+        now,
+        env,
+        listExecutables,
+        options.overrides?.[strategy.id]
+      )
+    )
+  );
+  return groups.filter((group): group is DiscoveredAcpAgentGroup => group !== undefined);
+}
+
+/**
+ * First-match-per-agent discovery (legacy view). Returns at most one record per
+ * agent — the first instance that passed the probe in candidate order.
+ */
 export async function discoverLocalAcpAgents(
   options: LocalAcpDiscoveryOptions = {}
 ): Promise<DiscoveredAcpAgent[]> {
-  const strategies = options.strategies ?? BUILT_IN_ACP_STRATEGIES;
-  const probe = options.probe ?? defaultProbe;
-  const now = options.now ?? Date.now;
-  const discovered = await Promise.all(
-    strategies.map((strategy) =>
-      discoverStrategy(strategy, probe, now, options.overrides?.[strategy.id])
-    )
-  );
-  return discovered.filter((agent): agent is DiscoveredAcpAgent => agent !== undefined);
+  const groups = await discoverLocalAcpAgentInstances(options);
+  return groups.flatMap((group) => {
+    const first = group.instances[0];
+    if (first === undefined) return [];
+    const agent: DiscoveredAcpAgent = {
+      strategyId: group.strategyId,
+      backendId: group.backendId,
+      name: group.name,
+      command: first.command,
+      args: group.args,
+      env: group.env,
+      discoveredAt: group.discoveredAt
+    };
+    if (first.version !== undefined) agent.version = first.version;
+    return [agent];
+  });
 }
 
-async function discoverStrategy(
+async function discoverStrategyInstances(
   strategy: Strategy,
   probe: LocalAcpAgentProbe,
   now: () => number,
+  env: NodeJS.ProcessEnv,
+  listExecutables: AcpPathExecutableLister,
   override?: string
-): Promise<DiscoveredAcpAgent | undefined> {
-  const candidates = candidateCommands(strategy, override);
-  for (const command of candidates) {
+): Promise<DiscoveredAcpAgentGroup | undefined> {
+  const candidates = candidateCommands(strategy, env, listExecutables, override);
+  const instances: DiscoveredAcpAgentInstance[] = [];
+  for (const candidate of candidates) {
     const [versionResult, helpResult] = await Promise.all([
-      runProbe(probe, command, strategy.discoveryProbe.versionArgs),
-      runProbe(probe, command, strategy.discoveryProbe.helpArgs)
+      runProbe(probe, candidate.command, strategy.discoveryProbe.versionArgs),
+      runProbe(probe, candidate.command, strategy.discoveryProbe.helpArgs)
     ]);
     if (!versionResult || !helpResult) {
       continue;
@@ -75,31 +165,99 @@ async function discoverStrategy(
       continue;
     }
     const version = parseCliVersion(resultText(versionResult));
-    const agent: DiscoveredAcpAgent = {
-      strategyId: strategy.id,
-      backendId: strategy.backendId,
-      name: strategy.displayName,
-      command,
-      args: ensureArgs(strategy.spawn.args, strategy.spawn.ensureArgs),
-      env: strategy.spawn.env ?? {},
-      discoveredAt: now()
+    const instance: DiscoveredAcpAgentInstance = {
+      command: candidate.command,
+      source: candidate.source
     };
-    if (version !== undefined) agent.version = version;
-    return agent;
+    if (version !== undefined) instance.version = version;
+    instances.push(instance);
   }
-  return undefined;
+  if (instances.length === 0) {
+    return undefined;
+  }
+  return {
+    strategyId: strategy.id,
+    backendId: strategy.backendId,
+    name: strategy.displayName,
+    args: ensureArgs(strategy.spawn.args, strategy.spawn.ensureArgs),
+    env: strategy.spawn.env ?? {},
+    instances,
+    discoveredAt: now()
+  };
 }
 
-function candidateCommands(strategy: Strategy, override?: string): string[] {
-  const candidates: string[] = [];
-  if (override && override.trim()) {
-    candidates.push(override.trim());
+type Candidate = { command: string; source: AcpAgentInstanceSource };
+
+/** Build the de-duplicated candidate list for a strategy: override first, then
+ *  every `PATH` match of the bare command (or the bare command itself when the
+ *  lister finds none, so `execFile`'s own `PATH` resolution still gets a shot),
+ *  then the strategy's fallback paths. Duplicates (by resolved real path) are
+ *  collapsed so the same physical binary isn't listed twice. */
+function candidateCommands(
+  strategy: Strategy,
+  env: NodeJS.ProcessEnv,
+  listExecutables: AcpPathExecutableLister,
+  override?: string
+): Candidate[] {
+  const out: Candidate[] = [];
+  const seen = new Set<string>();
+  const push = (command: string, source: AcpAgentInstanceSource): void => {
+    const trimmed = command.trim();
+    if (trimmed.length === 0) return;
+    const key = canonicalize(trimmed);
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ command: trimmed, source });
+  };
+
+  if (override && override.trim().length > 0) {
+    push(override, "override");
   }
-  candidates.push(strategy.discoveryProbe.command);
+  const pathMatches = listExecutables(strategy.discoveryProbe.command, env);
+  if (pathMatches.length > 0) {
+    for (const match of pathMatches) push(match, "path");
+  } else {
+    // No PATH hit (or an injected no-op lister): keep the bare command so
+    // `execFile` resolves it via its own PATH and scripted-probe tests match.
+    push(strategy.discoveryProbe.command, "path");
+  }
   for (const fallback of strategy.discoveryProbe.fallbackCommands ?? []) {
-    candidates.push(fallback);
+    push(fallback, "fallback");
   }
-  return [...new Set(candidates)];
+  return out;
+}
+
+/** Resolve symlinks so the same binary reached via two PATH entries dedupes. */
+function canonicalize(command: string): string {
+  if (!path.isAbsolute(command)) return command;
+  try {
+    return realpathSync(command);
+  } catch {
+    return command;
+  }
+}
+
+/** Default `PATH` executable lister: scan each `PATH` dir for an executable
+ *  file named `command`, in order. POSIX only (Windows returns none). */
+function defaultListExecutables(command: string, env: NodeJS.ProcessEnv): string[] {
+  if (process.platform === "win32") return [];
+  // A bare command name only — never enumerate when a path was passed.
+  if (command.includes(path.sep)) return [];
+  const pathValue = env.PATH ?? env.Path ?? "";
+  const found: string[] = [];
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (dir.length === 0) continue;
+    const candidate = path.join(dir, command);
+    try {
+      const stat = statSync(candidate);
+      if (stat.isFile() && (stat.mode & 0o111) !== 0) {
+        found.push(candidate);
+      }
+    } catch {
+      // Not in this dir; keep scanning.
+    }
+  }
+  return found;
 }
 
 function ensureArgs(args: string[], ensure: string[] | undefined): string[] {
@@ -113,11 +271,14 @@ function ensureArgs(args: string[], ensure: string[] | undefined): string[] {
   return result;
 }
 
-async function defaultProbe(
-  command: string,
-  args: string[]
-): Promise<LocalAcpProbeResult> {
-  return await execFile(command, args, { timeout: 5_000, maxBuffer: 1024 * 1024 });
+function makeDefaultProbe(env: NodeJS.ProcessEnv): LocalAcpAgentProbe {
+  return async (command: string, args: string[]): Promise<LocalAcpProbeResult> => {
+    return await execFile(command, args, {
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+      env
+    });
+  };
 }
 
 async function runProbe(
