@@ -68,6 +68,22 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(completed).toMatchObject({ status: "completed" });
   });
 
+  it("mints globally-unique thread ids across client instances (no acp:gemini:1 collision)", async () => {
+    // Two separate clients (e.g. two app runs, or two chat surfaces) must not
+    // both produce `acp:gemini:1` — that collided on a host's UNIQUE thread id.
+    const a = new AcpAgentClient({ transport: new FakeAcpAgentTransport(), strategy: geminiStrategy, now: () => 1 });
+    const b = new AcpAgentClient({ transport: new FakeAcpAgentTransport(), strategy: geminiStrategy, now: () => 1 });
+    const a1 = (await a.startThread()).threadId;
+    const a2 = (await a.startThread()).threadId;
+    const b1 = (await b.startThread()).threadId;
+    expect(new Set([a1, a2, b1]).size).toBe(3); // all distinct
+    expect(a1).not.toBe("acp:gemini:1");
+    expect(a1).toMatch(/^acp:gemini:[0-9a-f]+-1$/); // <instance>-<seq>
+    expect(a2).toMatch(/^acp:gemini:[0-9a-f]+-2$/);
+    await a.close();
+    await b.close();
+  });
+
   it("serializes mcpServers to the ACP wire shape (env array + required args)", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpAgentClient({

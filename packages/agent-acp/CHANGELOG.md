@@ -1,5 +1,18 @@
 # @pwrdrvr/agent-acp
 
+## 0.2.2
+
+### Patch Changes
+
+- Mint globally-unique ACP thread ids. The id was `acp:<strategy>:<n>` where `n`
+  is a per-client-instance counter starting at 1, so the first thread was
+  `acp:gemini:1` on every client instance AND every process restart. Hosts that
+  persist threads under a UNIQUE thread id (PwrSnap's `chat_threads.thread_id`)
+  hit a constraint violation on the second run ("Chat is unavailable"). Ids are
+  now `acp:<strategy>:<instance>-<seq>` with a per-client random instance base —
+  globally unique, still monotonic + distinct within a client. The `acp:<id>:`
+  prefix is unchanged.
+
 ## 0.2.1
 
 ### Patch Changes
