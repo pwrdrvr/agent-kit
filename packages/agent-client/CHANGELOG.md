@@ -1,5 +1,25 @@
 # @pwrdrvr/agent-client
 
+## 0.5.0
+
+### Minor Changes
+
+- Agent lifecycle pool + per-thread MCP tools, so one shared ACP process can serve
+  every surface.
+
+  - **`AcpAgentClientPool`** (agent-acp): `acquire(key, factory)` returns the SAME
+    warmed client for a key; concurrent acquires share ONE spawn (the in-flight
+    promise), so a careless caller can't spin up dozens of agent processes. A
+    failed/timed-out warm-up evicts + retries. `warm(key, factory)` is
+    fire-and-forget for non-blocking startup; `release(key)` / `closeAll()` own
+    teardown. New `AcpAgentClient.connect()` warms the process (spawn +
+    `initialize`) without opening a session.
+  - **Per-thread MCP servers**: `AcpAgentClient.reopenThread` accepts `mcpServers`,
+    overriding the client-level default for THAT session, and
+    `ChatThreadController` forwards a per-surface `threadMcpServers` dep to it. So a
+    single shared agent process can host library-chat threads (library tools) and
+    sizzle-chat threads (sizzle tools) at once — each thread spawns its own tools.
+
 ## 0.4.0
 
 ### Minor Changes

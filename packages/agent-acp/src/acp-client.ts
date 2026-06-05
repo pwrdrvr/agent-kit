@@ -330,12 +330,18 @@ export class AcpAgentClient implements AgentBackend {
     /** Built ONLY when a re-establish actually happens (skipped for a live
      *  session), so the host doesn't rebuild the system prompt every turn. */
     buildInstructions?: () => string;
+    /** Per-thread MCP servers for THIS session. Lets ONE shared client serve
+     *  surfaces with different tool sets (library vs sizzle): each surface
+     *  passes its own servers, so its threads spawn its tools — overriding the
+     *  client-level default. */
+    mcpServers?: AcpMcpServerConfig[];
   }): Promise<void> {
     if (this.sessions.has(options.threadId)) return;
     const instructions = options.buildInstructions?.();
     await this.establishSession({
       bindThreadId: options.threadId,
-      ...(instructions !== undefined ? { instructions } : {})
+      ...(instructions !== undefined ? { instructions } : {}),
+      ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {})
     });
   }
 
@@ -355,6 +361,14 @@ export class AcpAgentClient implements AgentBackend {
     const out: AgentBackendStartThreadResult = { threadId };
     out.modelProvider = this.strategy.id;
     return out;
+  }
+
+  /** Warm the agent: spawn the process + run the `initialize` handshake WITHOUT
+   *  opening a session, so the first thread/turn doesn't pay the multi-second
+   *  spawn. Idempotent. Used by `AcpAgentClientPool` to hold a configured agent
+   *  ready from app startup. */
+  async connect(): Promise<void> {
+    await this.initialize();
   }
 
   /** Shared `session/new` + session registration. Mints a new thread id unless

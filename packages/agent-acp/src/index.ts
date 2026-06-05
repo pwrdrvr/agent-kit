@@ -22,6 +22,11 @@ export {
   type AcpTitleHandler,
   type AcpRuntimeCapabilitiesHandler
 } from "./acp-client";
+export {
+  AcpAgentClientPool,
+  type AcpAgentClientFactory,
+  type AcpAgentClientPoolOptions
+} from "./acp-agent-client-pool";
 
 export {
   AcpOneShotClient,

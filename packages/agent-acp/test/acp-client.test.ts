@@ -242,6 +242,22 @@ describe("AcpAgentClient — lifecycle", () => {
     await client.close();
   });
 
+  it("reopenThread passes per-thread mcpServers to session/new (shared client, per-surface tools)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    await client.reopenThread({
+      threadId: "acp:gemini:lib-thread",
+      mcpServers: [{ name: "pwrsnap-library", command: "/x", env: { TOK: "lib" } }]
+    });
+    const sessionNew = transport.requests.find((r) => r.method === "session/new");
+    const servers = (sessionNew?.params as {
+      mcpServers: Array<{ name: string; env: Array<{ name: string; value: string }> }>;
+    }).mcpServers;
+    expect(servers[0]?.name).toBe("pwrsnap-library");
+    expect(servers[0]?.env).toEqual([{ name: "TOK", value: "lib" }]);
+    await client.close();
+  });
+
   it("reopenThread is a no-op when the session is already live", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = makeClient(transport);

@@ -40,7 +40,11 @@ class FakeBackend {
   clearThreadGitInfo = vi.fn(async (_threadId: string) => undefined);
   close = vi.fn(async () => undefined);
   reopenThread = vi.fn(
-    async (_opts: { threadId: string; buildInstructions?: () => string }) => undefined
+    async (_opts: {
+      threadId: string;
+      buildInstructions?: () => string;
+      mcpServers?: readonly unknown[];
+    }) => undefined
   );
   /** Set by a test to exercise the lazy-thread path; undefined by default so the
    *  controller uses `startThread` (the existing behavior all other tests rely
@@ -302,15 +306,21 @@ describe("ChatThreadController", () => {
     expect(client.startThread).not.toHaveBeenCalled();
   });
 
-  it("re-establishes an ACP-style backend session (reopenThread) before each turn", async () => {
-    const { controller, client } = makeController();
+  it("re-establishes an ACP-style backend session (reopenThread) before each turn, with per-surface mcpServers", async () => {
+    const mcp = [{ name: "pwrsnap-library", command: "/x" }];
+    const { controller, client } = makeController({ threadMcpServers: mcp });
     const view = await controller.createThread({ name: "T" });
     const tid = view.threadId;
     await controller.sendMessage({ threadId: tid, text: "resume me" });
     // The controller ensures the backend has a live session for the (possibly
-    // persisted) thread, passing the thread id + the rebuilt system prompt.
+    // persisted) thread, passing the thread id + rebuilt system prompt + this
+    // surface's MCP servers (so a shared agent process spawns the right tools).
     expect(client.reopenThread).toHaveBeenCalledWith(
-      expect.objectContaining({ threadId: tid, buildInstructions: expect.any(Function) })
+      expect.objectContaining({
+        threadId: tid,
+        buildInstructions: expect.any(Function),
+        mcpServers: mcp
+      })
     );
     // The builder lazily yields the system prompt only if the backend re-opens.
     const passed = client.reopenThread.mock.calls[0]?.[0];

@@ -132,6 +132,11 @@ export type ChatThreadControllerDeps<TSettings = unknown> = {
   threadConfig?: Record<string, unknown>;
   /** Thread environments. `[]` disables exec-environment access. */
   threadEnvironments?: unknown[];
+  /** Opaque per-surface MCP server config forwarded to an ACP backend's
+   *  `reopenThread` so a SHARED agent process can serve this surface's tools
+   *  (different surfaces pass different servers). Ignored by backends without
+   *  `reopenThread` (Codex). */
+  threadMcpServers?: readonly unknown[];
   /** Reasoning effort for turns. Defaults to "medium". */
   effort?: string;
   /** Default model id for thread/start (host's per-surface default). Omit for Codex default. */
@@ -474,16 +479,21 @@ export class ChatThreadController<TSettings = unknown> {
       reopenThread?: (options: {
         threadId: string;
         buildInstructions?: () => string;
+        mcpServers?: readonly unknown[];
       }) => Promise<void>;
     };
     if (typeof reopenable.reopenThread === "function") {
       // Lazy: the backend only builds the prompt if it actually re-establishes
       // a session (skipped when the session is still live), so a normal turn
-      // doesn't rebuild the system prompt.
+      // doesn't rebuild the system prompt. The per-surface MCP servers ride
+      // along so a SHARED agent process spawns THIS surface's tools.
       await reopenable.reopenThread({
         threadId,
         buildInstructions: () =>
-          this.deps.buildSystemPrompt({ settings: settingsSnapshot, anchorId: anchorForTurn })
+          this.deps.buildSystemPrompt({ settings: settingsSnapshot, anchorId: anchorForTurn }),
+        ...(this.deps.threadMcpServers !== undefined
+          ? { mcpServers: this.deps.threadMcpServers }
+          : {})
       });
     }
 
