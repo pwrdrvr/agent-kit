@@ -1,5 +1,29 @@
 # @pwrdrvr/agent-acp
 
+## 0.3.0
+
+### Minor Changes
+
+- Auto-approve host-configured MCP tools, fix approval routing, and prefer the
+  agent's session GUID for thread ids.
+
+  - **`autoApproveConfiguredMcpTools` option**: when set, `session/request_permission`
+    for a tool served by one of the configured `mcpServers` is approved
+    automatically (preferring a session-wide server allow so the agent stops
+    prompting) WITHOUT a host round-trip. Those servers are host-trusted, so the
+    agent shouldn't prompt to call them. The agent's OWN tools (shell/file/web)
+    still route to the host approval handler. Verified live: Gemini calls a host
+    MCP tool with no approval prompt.
+  - **Approval routing fix**: ACP permission requests only carry a `sessionId`,
+    not the kit `threadId`. The client now injects the RESOLVED `threadId` into
+    the params it passes to the host approval handler, so hosts can match the
+    approval to a thread even with multiple turns in flight (previously they were
+    forced to auto-deny).
+  - **Thread id from session GUID**: `threadId` now reuses the agent's session id
+    when it's a well-formed UUID (`acp:<strategy>:<sessionId>`), falling back to a
+    host-minted `randomUUID()` otherwise — traceable to the live session, still
+    globally unique, never a counter.
+
 ## 0.2.3
 
 ### Patch Changes

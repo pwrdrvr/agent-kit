@@ -83,6 +83,13 @@ export type AcpAgentClientOptions = {
   cwd?: string;
   /** MCP servers to attach at `session/new` / `session/load`. */
   mcpServers?: AcpMcpServerConfig[];
+  /** Auto-approve `session/request_permission` for tools served by one of the
+   *  configured `mcpServers`. Those servers are host-trusted (the host wired
+   *  them up), so the agent doesn't need to prompt the user to call them — and
+   *  auto-approval here sidesteps approval routing when the request can't be
+   *  mapped to a thread. The agent's OWN built-in tools (shell/file/web) are
+   *  unaffected and still go through the host approval handler. Default false. */
+  autoApproveConfiguredMcpTools?: boolean;
   now?: () => number;
   logger?: Logger;
 };
@@ -186,6 +193,7 @@ export class AcpAgentClient implements AgentBackend {
     this.clientVersion = options.clientVersion ?? "0.0.0";
     this.defaultCwd = options.cwd;
     this.defaultMcpServers = options.mcpServers ?? [];
+    this.autoApproveConfiguredMcpTools = options.autoApproveConfiguredMcpTools ?? false;
   }
 
   private readonly clientName: string;
@@ -193,6 +201,7 @@ export class AcpAgentClient implements AgentBackend {
   private readonly clientVersion: string;
   private readonly defaultCwd: string | undefined;
   private readonly defaultMcpServers: AcpMcpServerConfig[];
+  private readonly autoApproveConfiguredMcpTools: boolean;
 
   // ---- subscriptions (mirror CodexThreadClient) ----
 
@@ -334,13 +343,14 @@ export class AcpAgentClient implements AgentBackend {
     if (!protocolSessionId) {
       throw new Error("ACP session/new did not return a session id");
     }
-    // Host-minted UUID, NOT a counter. ACP returns a session GUID
-    // (`protocolSessionId`, used below for wire routing), but the host-facing
-    // `threadId` is our own handle — a per-thread `randomUUID()` is globally
-    // unique regardless of how (or whether) a given agent makes its session id
-    // unique, so hosts persisting threads under a UNIQUE id never collide
-    // across threads, client instances, or process restarts.
-    const threadId = `acp:${this.strategy.id}:${randomUUID()}`;
+    // Prefer the agent's session GUID for the host-facing `threadId` (it's the
+    // id ACP already hands us, so the thread is traceable straight to the live
+    // session) — but ONLY when it's a well-formed UUID. Many agents return a
+    // proper UUID; if one returns a counter / opaque token instead, fall back
+    // to a host-minted `randomUUID()` so our id is globally unique regardless of
+    // the agent's choice. Never a plain integer counter.
+    const threadIdSuffix = isUuid(protocolSessionId) ? protocolSessionId : randomUUID();
+    const threadId = `acp:${this.strategy.id}:${threadIdSuffix}`;
     const session: AcpSessionState = {
       threadId,
       protocolSessionId,
@@ -657,6 +667,22 @@ export class AcpAgentClient implements AgentBackend {
       ? this.threadIdByProtocolId.get(protocolSessionId)
       : undefined;
     const options = readPermissionOptions(params.options);
+
+    // Auto-approve tools served by a host-configured MCP server. They're
+    // host-trusted (the host wired them up), so the agent shouldn't have to
+    // prompt to call them — and approving here, without a host round-trip, also
+    // sidesteps approval routing when `sessionId` can't be mapped to a thread.
+    // The agent's OWN tools (shell/file/web) fall through to the host handler.
+    if (
+      this.autoApproveConfiguredMcpTools &&
+      permissionTargetsConfiguredMcpServer(
+        params,
+        this.defaultMcpServers.map((server) => server.name)
+      )
+    ) {
+      return autoApprovePermissionOutcome(options);
+    }
+
     const handler = this.approvalHandler;
     if (!handler) {
       return cancelledPermissionOutcome();
@@ -673,7 +699,13 @@ export class AcpAgentClient implements AgentBackend {
       this.emit({ kind: "approval_request", threadId, approval });
     }
 
-    const decision = await handler("session/request_permission", params);
+    // Hand the host the RESOLVED `threadId`. The raw ACP params only carry a
+    // `sessionId`, so without this the host can't match the approval to a
+    // thread and (with >1 turn in flight) is forced to auto-deny.
+    const decision = await handler(
+      "session/request_permission",
+      threadId !== undefined ? { ...params, threadId } : params
+    );
     return permissionOutcomeFromDecision(decision, options);
   }
 
@@ -913,6 +945,52 @@ function permissionOutcomeFromDecision(
 
 function cancelledPermissionOutcome(): { outcome: { outcome: "cancelled" } } {
   return { outcome: { outcome: "cancelled" } };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(value: string | undefined): value is string {
+  return value !== undefined && UUID_RE.test(value);
+}
+
+/** Does a `session/request_permission` target a tool from one of the named
+ *  (host-configured) MCP servers? Agents name MCP tool calls after the server:
+ *  Gemini uses a `mcp_<server>_<tool>` toolCallId and a
+ *  `"<tool> (<server> MCP Server)"` title. Matched case-insensitively. */
+function permissionTargetsConfiguredMcpServer(
+  params: Record<string, unknown>,
+  serverNames: string[]
+): boolean {
+  if (serverNames.length === 0) return false;
+  const toolCall = asRecord(params.toolCall);
+  if (!toolCall) return false;
+  const toolCallId = (readString(toolCall, "toolCallId") ?? "").toLowerCase();
+  const title = (readString(toolCall, "title") ?? "").toLowerCase();
+  return serverNames.some((rawName) => {
+    const name = rawName.toLowerCase();
+    return (
+      toolCallId.includes(`mcp_${name}_`) ||
+      title.includes(`(${name} mcp`) ||
+      title.includes(`${name} mcp server`)
+    );
+  });
+}
+
+/** Pick the best "allow" option for an auto-approved tool, preferring a
+ *  session-wide server allow (so the agent stops prompting for the rest of the
+ *  session), then any allow-always, then allow-once. */
+function autoApprovePermissionOutcome(
+  options: AcpPermissionOption[]
+): { outcome: { outcome: "selected"; optionId: string } | { outcome: "cancelled" } } {
+  const allow =
+    options.find(
+      (option) => option.kind === "allow_always" && /server/i.test(option.optionId)
+    ) ??
+    options.find((option) => option.kind === "allow_always") ??
+    options.find((option) => option.kind === "allow_once") ??
+    options.find((option) => option.name?.toLowerCase().includes("allow"));
+  return allow
+    ? { outcome: { outcome: "selected", optionId: allow.optionId } }
+    : cancelledPermissionOutcome();
 }
 
 function selectPermissionOptionId(

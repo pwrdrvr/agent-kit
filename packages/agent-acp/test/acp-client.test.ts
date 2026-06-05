@@ -203,6 +203,89 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(outcome).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
   });
 
+  it("uses the agent's session GUID as the thread id when it is a UUID", async () => {
+    const uuid = "836a1942-8a8e-4c8d-9744-497242519df5";
+    const transport = new FakeAcpAgentTransport({ "session/new": { sessionId: uuid } });
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread();
+    expect(threadId).toBe(`acp:gemini:${uuid}`);
+    await client.close();
+  });
+
+  it("auto-approves a configured MCP server's tool without consulting the host", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      now: () => 1,
+      mcpServers: [{ name: "pwrsnap", command: "/x" }],
+      autoApproveConfiguredMcpTools: true
+    });
+    await client.startThread();
+    let handlerCalled = false;
+    client.onApprovalRequest(async () => {
+      handlerCalled = true;
+      return "denied";
+    });
+    const outcome = await transport.emitRequest(
+      "session/request_permission",
+      {
+        sessionId: "session-1",
+        toolCall: {
+          toolCallId: "mcp_pwrsnap_read_ocr_text__1",
+          title: "read_ocr_text (pwrsnap MCP Server)",
+          kind: "other"
+        },
+        options: [
+          { optionId: "proceed_always_server", name: "Allow all server tools", kind: "allow_always" },
+          { optionId: "proceed_once", name: "Allow", kind: "allow_once" },
+          { optionId: "cancel", name: "Reject", kind: "reject_once" }
+        ]
+      },
+      "req-mcp"
+    );
+    // Prefers the session-wide server allow so the agent stops prompting.
+    expect(outcome).toEqual({
+      outcome: { outcome: "selected", optionId: "proceed_always_server" }
+    });
+    expect(handlerCalled).toBe(false);
+    await client.close();
+  });
+
+  it("does NOT auto-approve the agent's own tools; routes them with a resolved threadId", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      now: () => 1,
+      mcpServers: [{ name: "pwrsnap", command: "/x" }],
+      autoApproveConfiguredMcpTools: true
+    });
+    const { threadId } = await client.startThread();
+    let seen: Record<string, unknown> | undefined;
+    client.onApprovalRequest(async (_method, params) => {
+      seen = params as Record<string, unknown>;
+      return "denied";
+    });
+    await transport.emitRequest(
+      "session/request_permission",
+      {
+        sessionId: "session-1",
+        toolCall: { toolCallId: "shell_1", title: "Run shell command", kind: "execute" },
+        options: [
+          { optionId: "allow", kind: "allow_once" },
+          { optionId: "deny", kind: "reject_once" }
+        ]
+      },
+      "req-shell"
+    );
+    expect(seen).toBeDefined();
+    // The host handler gets the RESOLVED threadId injected (raw ACP params only
+    // carry sessionId), so it can route even with multiple turns in flight.
+    expect(seen?.threadId).toBe(threadId);
+    await client.close();
+  });
+
   it("session/cancel terminates an in-flight prompt", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = makeClient(transport);
