@@ -76,6 +76,28 @@ describe("AcpOneShotClient", () => {
     await client.close();
   });
 
+  it("reports token usage from the session/prompt response _meta.quota", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x" });
+    await tick();
+    transport.emitSessionUpdate("session-1", {
+      sessionUpdate: "agent_message_chunk",
+      content: "ok"
+    });
+    transport.finishPrompt({
+      stopReason: "end_turn",
+      _meta: { quota: { token_count: { input_tokens: 100, output_tokens: 20 } } }
+    });
+    const response = await pending;
+    expect(response.tokenUsage).toEqual({
+      totalTokens: 120,
+      inputTokens: 100,
+      outputTokens: 20
+    });
+    await client.close();
+  });
+
   it("listModels resolves to an array (empty when the agent advertises none)", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });

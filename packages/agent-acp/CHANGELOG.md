@@ -1,5 +1,15 @@
 # @pwrdrvr/agent-acp
 
+## 0.1.8
+
+### Patch Changes
+
+- Report ACP token usage. Agents return per-turn usage on the `session/prompt`
+  RESPONSE (`_meta.quota.token_count`, e.g. Gemini's input/output tokens), which
+  the client previously discarded. `AcpAgentClient` now parses it and emits a
+  `token_usage` event, so `AcpOneShotClient.run()` returns `tokenUsage` and hosts
+  can account for ACP turns like Codex turns. Verified live against Gemini.
+
 ## 0.1.7
 
 ### Patch Changes

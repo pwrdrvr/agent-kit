@@ -28,6 +28,7 @@ import {
   type NormalizedApprovalRequest,
   type NormalizedThreadEvent,
   type NormalizedThreadSettings,
+  type NormalizedTokenUsage,
   type Unsubscribe
 } from "@pwrdrvr/agent-core";
 import { mkdirSync } from "node:fs";
@@ -384,8 +385,9 @@ export class AcpAgentClient implements AgentBackend {
       options.promptContent ??
       textPrompt(options.prompt ?? "");
 
+    let promptResult: unknown;
     try {
-      await this.transport.request(
+      promptResult = await this.transport.request(
         "session/prompt",
         {
           sessionId: session.protocolSessionId,
@@ -408,6 +410,14 @@ export class AcpAgentClient implements AgentBackend {
         message: errorMessage(error)
       });
       throw error;
+    }
+
+    // Token usage rides on the `session/prompt` RESPONSE (`_meta.quota`), not a
+    // session/update — emit it so hosts can account for ACP turns the same way
+    // they do Codex turns.
+    const usage = readAcpPromptUsage(promptResult);
+    if (usage) {
+      this.emit({ kind: "token_usage", threadId: session.threadId, turnId, usage });
     }
 
     // Flush any in-flight assistant bubble into a terminal agent_message.
@@ -918,4 +928,27 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** Read token usage from a `session/prompt` response. Agents report it in
+ *  `_meta.quota.token_count`, e.g. Gemini:
+ *  `{ _meta: { quota: { token_count: { input_tokens, output_tokens } } } }`.
+ *  Returns undefined when no usage is present. */
+function readAcpPromptUsage(result: unknown): NormalizedTokenUsage | undefined {
+  const meta = asRecord(asRecord(result)?._meta);
+  const tokenCount = asRecord(asRecord(meta?.quota)?.token_count);
+  if (!tokenCount) return undefined;
+  const num = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  const input = num(tokenCount.input_tokens);
+  const output = num(tokenCount.output_tokens);
+  const cached = num(tokenCount.cached_input_tokens ?? tokenCount.cached_tokens);
+  const reasoning = num(tokenCount.thoughts_tokens ?? tokenCount.reasoning_tokens);
+  if (input === undefined && output === undefined) return undefined;
+  const usage: NormalizedTokenUsage = { totalTokens: (input ?? 0) + (output ?? 0) };
+  if (input !== undefined) usage.inputTokens = input;
+  if (output !== undefined) usage.outputTokens = output;
+  if (cached !== undefined) usage.cachedInputTokens = cached;
+  if (reasoning !== undefined) usage.reasoningOutputTokens = reasoning;
+  return usage;
 }
