@@ -50,9 +50,11 @@ import {
   type NormalizedThreadView,
   type NormalizedTokenUsage,
   type NormalizedToolCall,
+  type NormalizedToolCallUpdate,
   type NormalizedTurnStatus,
   type ThreadListOptions,
-  type ThreadStore
+  type ThreadStore,
+  mergeToolCall
 } from "@pwrdrvr/agent-core";
 import type {
   DynamicToolCallParams,
@@ -201,6 +203,11 @@ export class ChatThreadController<TSettings = unknown> {
   /** Per-thread recent turn timestamps for rate limiting. */
   private readonly turnTimestamps = new Map<string, number[]>();
   private readonly threadModels = new Map<string, ThreadModelState>();
+  /** Accumulates streamed `tool_call`/`tool_call_update` events by id so the
+   *  full call can be surfaced once it reaches a terminal status (ACP backends
+   *  stream pending → in_progress → completed for tools they run themselves /
+   *  via MCP, unlike the Codex `onToolCall` request seam). Keyed by toolCall id. */
+  private readonly streamedToolCalls = new Map<string, NormalizedToolCall>();
   private wired = false;
 
   constructor(deps: ChatThreadControllerDeps<TSettings>) {
@@ -539,11 +546,50 @@ export class ChatThreadController<TSettings = unknown> {
       case "error":
         void this.onTurnError(event.threadId, event.turnId, event.message, event.willRetry);
         return;
-      default:
-        // reasoning_delta / agent_message / tool_call(_update) / plan_update /
-        // turn_started / approval_request are handled via the dedicated
-        // tool-call + approval seams or are informational; nothing to commit.
+      case "tool_call":
+      case "tool_call_update":
+        // Backends that run their OWN tools (ACP agents — directly or via an
+        // MCP server) report them as streamed tool_call events, NOT through the
+        // `onToolCall` request seam (which only fires for host dynamic tools the
+        // backend asks US to run, i.e. Codex). Surface those to the chat UI too,
+        // so an ACP agent's tool usage shows the same activity chips as Codex.
+        this.onStreamedToolCall(event);
         return;
+      default:
+        // reasoning_delta / agent_message / plan_update / turn_started /
+        // approval_request are handled elsewhere or are informational.
+        return;
+    }
+  }
+
+  /** Accumulate a streamed tool_call / tool_call_update and broadcast it ONCE
+   *  it settles. The host UI dedups activity chips by id, so — like the
+   *  `onToolCall` seam — we surface only the terminal state with its final
+   *  status + label, rather than the intermediate pending/in-progress churn. */
+  private onStreamedToolCall(
+    event: Extract<NormalizedThreadEvent, { kind: "tool_call" | "tool_call_update" }>
+  ): void {
+    const id = event.toolCall.id;
+    const merged: NormalizedToolCall =
+      event.kind === "tool_call"
+        ? event.toolCall
+        : mergeToolCall(
+            this.streamedToolCalls.get(id) ?? synthesizeToolCallBase(event.toolCall),
+            event.toolCall
+          );
+    this.streamedToolCalls.set(id, merged);
+    if (
+      merged.status === "completed" ||
+      merged.status === "failed" ||
+      merged.status === "cancelled"
+    ) {
+      this.streamedToolCalls.delete(id);
+      this.deps.broadcast({
+        type: "tool_call",
+        threadId: event.threadId,
+        turnId: event.turnId,
+        toolCall: merged
+      });
     }
   }
 
@@ -816,6 +862,19 @@ function approvalKey(threadId: string, turnId: string, approvalId: string): stri
 /** Friendly present-tense label for a tool invocation, shown as an activity chip.
  *  The host supplies the label map; falls back to the raw tool name. The `ok` flag
  *  lets a failed call read "couldn't …". */
+/** Build a minimal full tool call from a `tool_call_update` that arrived with
+ *  no prior `tool_call` to merge into (defensive — backends normally lead with
+ *  a full `tool_call`). */
+function synthesizeToolCallBase(update: NormalizedToolCallUpdate): NormalizedToolCall {
+  return {
+    id: update.id,
+    name: update.name ?? "tool",
+    kind: update.kind ?? "other",
+    label: update.label ?? update.name ?? "tool",
+    status: update.status ?? "in_progress"
+  };
+}
+
 function humanizeToolCall(tool: string, ok: boolean, labels: ToolLabelMap = {}): string {
   const label = labels[tool] ?? tool;
   return ok ? label : `Couldn't: ${label.toLowerCase()}`;

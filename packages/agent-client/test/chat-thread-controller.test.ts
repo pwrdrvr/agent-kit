@@ -279,6 +279,45 @@ describe("ChatThreadController", () => {
     expect(user?.text).toBe("hello");
   });
 
+  it("broadcasts a streamed (ACP) tool_call only once it reaches a terminal status", async () => {
+    const { controller, client, events } = makeController();
+    const view = await controller.createThread({ name: "T" });
+    const tid = view.threadId;
+    const { turnId } = await controller.sendMessage({ threadId: tid, text: "read it" });
+
+    // Agent (ACP / MCP) runs its own tool: pending → in_progress → completed.
+    client.emit({
+      kind: "tool_call",
+      threadId: tid,
+      turnId,
+      toolCall: { id: "t1", name: "read_ocr_text", kind: "other", label: "read_ocr_text", status: "pending" }
+    });
+    client.emit({
+      kind: "tool_call_update",
+      threadId: tid,
+      turnId,
+      toolCall: { id: "t1", status: "in_progress" }
+    });
+    expect(events.filter((e) => e.type === "tool_call")).toHaveLength(0); // not yet terminal
+
+    client.emit({
+      kind: "tool_call_update",
+      threadId: tid,
+      turnId,
+      toolCall: { id: "t1", status: "completed", result: { ok: true } }
+    });
+    await tick();
+
+    const toolCalls = events.filter((e) => e.type === "tool_call");
+    expect(toolCalls).toHaveLength(1); // exactly one terminal broadcast
+    const broadcast = toolCalls[0] as { toolCall: { id: string; label: string; status: string } };
+    expect(broadcast.toolCall).toMatchObject({
+      id: "t1",
+      label: "read_ocr_text", // carried from the leading tool_call
+      status: "completed"
+    });
+  });
+
   it("commits a failed assistant message carrying the reason on a terminal turn error", async () => {
     const { controller, client } = makeController();
     const view = await controller.createThread({ name: "T" });
