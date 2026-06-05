@@ -1,5 +1,22 @@
 # @pwrdrvr/agent-acp
 
+## 0.1.9
+
+### Patch Changes
+
+- Discover Kimi Code CLI when it isn't on PATH. Two fixes to the `kimi` strategy:
+
+  - Add fallback install paths (`~/.kimi-code/bin/kimi`, Homebrew, `/usr/local`),
+    mirroring grok/qwen. The official installer drops a standalone binary at
+    `~/.kimi-code/bin/kimi` and does NOT add it to PATH, so a GUI-launched app
+    missed it entirely.
+  - Fix the help-match regex. Real `kimi acp --help` (v0.11.0) says "Agent Client
+    Protocol (ACP) server over stdio"; the old `/\bACP server\b/` never matched
+    because of the `)` between "ACP" and "server", so the probe rejected even an
+    on-PATH Kimi.
+
+  Verified end-to-end against a real Kimi Code 0.11.0 install.
+
 ## 0.1.8
 
 ### Patch Changes

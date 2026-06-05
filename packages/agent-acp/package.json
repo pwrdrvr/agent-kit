@@ -1,6 +1,6 @@
 {
   "name": "@pwrdrvr/agent-acp",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "ACP (Agent Client Protocol) backend adapter for agent-kit: speaks ACP over stdio to local Kimi/Qwen/Gemini/Grok CLIs and normalizes their session/update stream into the agent-core neutral schema.",
   "license": "MIT",
   "author": "PwrDrvr LLC",

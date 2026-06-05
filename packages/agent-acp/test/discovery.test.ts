@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { homedir } from "node:os";
+import path from "node:path";
 import type { NormalizedThreadEvent } from "@pwrdrvr/agent-core";
 import {
   discoverLocalAcpAgents,
@@ -74,6 +76,24 @@ describe("discoverLocalAcpAgents — strategy-driven", () => {
     const agents = await discoverLocalAcpAgents({ probe, listExecutables: noPathScan });
     expect(agents).toHaveLength(1);
     expect(agents[0]?.command).toBe("/opt/homebrew/bin/grok");
+  });
+
+  it("finds Kimi at its ~/.kimi-code/bin install path with the REAL acp --help text", async () => {
+    // The official Kimi Code installer (v0.11.0) drops a standalone binary here,
+    // does NOT add it to PATH, and its `acp --help` says "Agent Client Protocol
+    // (ACP) server over stdio" — regression guard for BOTH the missing fallback
+    // and the help-regex that never matched "(ACP) server".
+    const kimiPath = path.join(homedir(), ".kimi-code", "bin", "kimi");
+    const probe = scriptedProbe({
+      [kimiPath]: {
+        version: "0.11.0",
+        help: "Run kimi-code as an Agent Client Protocol (ACP) server over stdio."
+      }
+    });
+    const agents = await discoverLocalAcpAgents({ probe, listExecutables: noPathScan });
+    expect(agents.map((a) => a.strategyId)).toEqual(["kimi"]);
+    expect(agents[0]?.command).toBe(kimiPath);
+    expect(agents[0]?.version).toBe("0.11.0");
   });
 });
 
