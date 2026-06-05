@@ -83,13 +83,6 @@ export type AcpAgentClientOptions = {
   cwd?: string;
   /** MCP servers to attach at `session/new` / `session/load`. */
   mcpServers?: AcpMcpServerConfig[];
-  /** Auto-approve `session/request_permission` for tools served by one of the
-   *  configured `mcpServers`. Those servers are host-trusted (the host wired
-   *  them up), so the agent doesn't need to prompt the user to call them — and
-   *  auto-approval here sidesteps approval routing when the request can't be
-   *  mapped to a thread. The agent's OWN built-in tools (shell/file/web) are
-   *  unaffected and still go through the host approval handler. Default false. */
-  autoApproveConfiguredMcpTools?: boolean;
   now?: () => number;
   logger?: Logger;
 };
@@ -198,7 +191,6 @@ export class AcpAgentClient implements AgentBackend {
     this.clientVersion = options.clientVersion ?? "0.0.0";
     this.defaultCwd = options.cwd;
     this.defaultMcpServers = options.mcpServers ?? [];
-    this.autoApproveConfiguredMcpTools = options.autoApproveConfiguredMcpTools ?? false;
   }
 
   private readonly clientName: string;
@@ -206,7 +198,6 @@ export class AcpAgentClient implements AgentBackend {
   private readonly clientVersion: string;
   private readonly defaultCwd: string | undefined;
   private readonly defaultMcpServers: AcpMcpServerConfig[];
-  private readonly autoApproveConfiguredMcpTools: boolean;
 
   // ---- subscriptions (mirror CodexThreadClient) ----
 
@@ -765,21 +756,14 @@ export class AcpAgentClient implements AgentBackend {
       : undefined;
     const options = readPermissionOptions(params.options);
 
-    // Auto-approve tools served by a host-configured MCP server. They're
-    // host-trusted (the host wired them up), so the agent shouldn't have to
-    // prompt to call them — and approving here, without a host round-trip, also
-    // sidesteps approval routing when `sessionId` can't be mapped to a thread.
-    // The agent's OWN tools (shell/file/web) fall through to the host handler.
-    // The server names come from BOTH the client default AND every live session
-    // (per-thread mcpServers), since a pooled/shared client carries no
-    // client-level default.
-    if (
-      this.autoApproveConfiguredMcpTools &&
-      permissionTargetsConfiguredMcpServer(params, this.knownMcpServerNames())
-    ) {
-      return autoApprovePermissionOutcome(options);
-    }
-
+    // The client makes NO trust decision of its own — every permission request
+    // goes to the host's approval handler, which owns the policy (e.g. a host
+    // may pre-approve tools from MCP servers IT configured). We give the host
+    // the context the raw ACP params lack: the RESOLVED `threadId` (params only
+    // carry a `sessionId`) and `mcpServerNames` — the union of this client's
+    // default servers and every live session's per-thread servers — so the host
+    // can recognize a tool call that targets a server it wired up. With no
+    // handler registered there's no one to decide, so the request is cancelled.
     const handler = this.approvalHandler;
     if (!handler) {
       return cancelledPermissionOutcome();
@@ -796,13 +780,12 @@ export class AcpAgentClient implements AgentBackend {
       this.emit({ kind: "approval_request", threadId, approval });
     }
 
-    // Hand the host the RESOLVED `threadId`. The raw ACP params only carry a
-    // `sessionId`, so without this the host can't match the approval to a
-    // thread and (with >1 turn in flight) is forced to auto-deny.
-    const decision = await handler(
-      "session/request_permission",
-      threadId !== undefined ? { ...params, threadId } : params
-    );
+    const handlerParams: Record<string, unknown> = {
+      ...params,
+      mcpServerNames: this.knownMcpServerNames()
+    };
+    if (threadId !== undefined) handlerParams.threadId = threadId;
+    const decision = await handler("session/request_permission", handlerParams);
     return permissionOutcomeFromDecision(decision, options);
   }
 
@@ -1049,47 +1032,6 @@ function isUuid(value: string | undefined): value is string {
   return value !== undefined && UUID_RE.test(value);
 }
 
-/** Does a `session/request_permission` target a tool from one of the named
- *  (host-configured) MCP servers? Agents name MCP tool calls after the server:
- *  Gemini uses a `mcp_<server>_<tool>` toolCallId and a
- *  `"<tool> (<server> MCP Server)"` title. Matched case-insensitively. */
-function permissionTargetsConfiguredMcpServer(
-  params: Record<string, unknown>,
-  serverNames: string[]
-): boolean {
-  if (serverNames.length === 0) return false;
-  const toolCall = asRecord(params.toolCall);
-  if (!toolCall) return false;
-  const toolCallId = (readString(toolCall, "toolCallId") ?? "").toLowerCase();
-  const title = (readString(toolCall, "title") ?? "").toLowerCase();
-  return serverNames.some((rawName) => {
-    const name = rawName.toLowerCase();
-    return (
-      toolCallId.includes(`mcp_${name}_`) ||
-      title.includes(`(${name} mcp`) ||
-      title.includes(`${name} mcp server`)
-    );
-  });
-}
-
-/** Pick the best "allow" option for an auto-approved tool, preferring a
- *  session-wide server allow (so the agent stops prompting for the rest of the
- *  session), then any allow-always, then allow-once. */
-function autoApprovePermissionOutcome(
-  options: AcpPermissionOption[]
-): { outcome: { outcome: "selected"; optionId: string } | { outcome: "cancelled" } } {
-  const allow =
-    options.find(
-      (option) => option.kind === "allow_always" && /server/i.test(option.optionId)
-    ) ??
-    options.find((option) => option.kind === "allow_always") ??
-    options.find((option) => option.kind === "allow_once") ??
-    options.find((option) => option.name?.toLowerCase().includes("allow"));
-  return allow
-    ? { outcome: { outcome: "selected", optionId: allow.optionId } }
-    : cancelledPermissionOutcome();
-}
-
 function selectPermissionOptionId(
   decision: string,
   options: AcpPermissionOption[]
@@ -1104,9 +1046,15 @@ function selectPermissionOptionId(
     return exact.optionId;
   }
   if (normalized === "approve" || normalized === "accept" || normalized === "allow") {
+    // Prefer the BROADEST allow — a session-wide server allow first (so a host
+    // that pre-approves its own MCP tools isn't re-prompted on every call this
+    // session), then any allow-always, then allow-once.
     return (
-      options.find((option) => option.kind === "allow_once") ??
+      options.find(
+        (option) => option.kind === "allow_always" && /server/i.test(option.optionId)
+      ) ??
       options.find((option) => option.kind === "allow_always") ??
+      options.find((option) => option.kind === "allow_once") ??
       options.find((option) => option.name?.toLowerCase().includes("allow"))
     )?.optionId;
   }

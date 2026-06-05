@@ -278,20 +278,22 @@ describe("AcpAgentClient — lifecycle", () => {
     await client.close();
   });
 
-  it("auto-approves a configured MCP server's tool without consulting the host", async () => {
+  it("forwards a permission request to the host handler with the configured mcpServerNames", async () => {
+    // The client makes NO trust decision of its own. It hands the host handler
+    // the context the raw ACP params lack — the configured `mcpServerNames` —
+    // so the HOST can decide to pre-approve a tool from a server it wired up.
     const transport = new FakeAcpAgentTransport();
     const client = new AcpAgentClient({
       transport,
       strategy: geminiStrategy,
       now: () => 1,
-      mcpServers: [{ name: "pwrsnap", command: "/x" }],
-      autoApproveConfiguredMcpTools: true
+      mcpServers: [{ name: "pwrsnap", command: "/x" }]
     });
     await client.startThread();
-    let handlerCalled = false;
-    client.onApprovalRequest(async () => {
-      handlerCalled = true;
-      return "denied";
+    let seen: Record<string, unknown> | undefined;
+    client.onApprovalRequest(async (_method, params) => {
+      seen = params as Record<string, unknown>;
+      return "approved";
     });
     const outcome = await transport.emitRequest(
       "session/request_permission",
@@ -310,33 +312,34 @@ describe("AcpAgentClient — lifecycle", () => {
       },
       "req-mcp"
     );
-    // Prefers the session-wide server allow so the agent stops prompting.
+    // Host saw the configured server names so it can recognize its own tool.
+    expect(seen?.mcpServerNames).toEqual(["pwrsnap"]);
+    // An "approved" decision picks the BROADEST allow (session-wide server),
+    // so the host isn't re-prompted on every call this session.
     expect(outcome).toEqual({
       outcome: { outcome: "selected", optionId: "proceed_always_server" }
     });
-    expect(handlerCalled).toBe(false);
     await client.close();
   });
 
-  it("auto-approves PER-THREAD MCP tools when the client has no default mcpServers (pooled client)", async () => {
+  it("passes PER-THREAD mcpServers to the handler when the client has no default (pooled client)", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpAgentClient({
       transport,
       strategy: geminiStrategy,
-      now: () => 1,
+      now: () => 1
       // NO client-level mcpServers — a shared/pooled client attaches tools
       // per-thread instead.
-      autoApproveConfiguredMcpTools: true
     });
     // Establish a session with PER-THREAD mcpServers, as the chat controller does.
     await client.reopenThread({
       threadId: "acp:gemini:pooled-1",
       mcpServers: [{ name: "pwrsnap", command: "/x" }]
     });
-    let handlerCalled = false;
-    client.onApprovalRequest(async () => {
-      handlerCalled = true;
-      return "denied";
+    let seen: Record<string, unknown> | undefined;
+    client.onApprovalRequest(async (_method, params) => {
+      seen = params as Record<string, unknown>;
+      return "approved";
     });
     const outcome = await transport.emitRequest(
       "session/request_permission",
@@ -354,21 +357,21 @@ describe("AcpAgentClient — lifecycle", () => {
       },
       "req-pooled"
     );
+    // Per-thread server names reach the host even with no client-level default.
+    expect(seen?.mcpServerNames).toEqual(["pwrsnap"]);
     expect(outcome).toEqual({
       outcome: { outcome: "selected", optionId: "proceed_always_server" }
     });
-    expect(handlerCalled).toBe(false);
     await client.close();
   });
 
-  it("does NOT auto-approve the agent's own tools; routes them with a resolved threadId", async () => {
+  it("routes a permission request to the handler with a resolved threadId", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpAgentClient({
       transport,
       strategy: geminiStrategy,
       now: () => 1,
-      mcpServers: [{ name: "pwrsnap", command: "/x" }],
-      autoApproveConfiguredMcpTools: true
+      mcpServers: [{ name: "pwrsnap", command: "/x" }]
     });
     const { threadId } = await client.startThread();
     let seen: Record<string, unknown> | undefined;
@@ -392,6 +395,30 @@ describe("AcpAgentClient — lifecycle", () => {
     // The host handler gets the RESOLVED threadId injected (raw ACP params only
     // carry sessionId), so it can route even with multiple turns in flight.
     expect(seen?.threadId).toBe(threadId);
+    await client.close();
+  });
+
+  it("cancels a permission request when no host handler is registered", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      now: () => 1,
+      mcpServers: [{ name: "pwrsnap", command: "/x" }]
+    });
+    await client.startThread();
+    // No onApprovalRequest handler registered (e.g. a pooled client whose host
+    // forgot to wire one) — nothing can decide, so the request is cancelled.
+    const outcome = await transport.emitRequest(
+      "session/request_permission",
+      {
+        sessionId: "session-1",
+        toolCall: { toolCallId: "mcp_pwrsnap_read_ocr_text__1", title: "x", kind: "other" },
+        options: [{ optionId: "allow", kind: "allow_once" }]
+      },
+      "req-nohandler"
+    );
+    expect(outcome).toEqual({ outcome: { outcome: "cancelled" } });
     await client.close();
   });
 
