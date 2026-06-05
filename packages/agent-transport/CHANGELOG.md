@@ -1,5 +1,19 @@
 # @pwrdrvr/agent-transport
 
+## 0.1.5
+
+### Patch Changes
+
+- Restore two JsonRpcConnection behaviors lost in the in-tree → package extraction:
+
+  - Error messages again include the JSON-RPC `error.data` payload (serialized,
+    truncated to ~1000 chars). Codex/ACP carry the most useful detail — often the
+    nested provider error — in `data`; dropping it made errors harder to debug.
+  - `request()` now tears down the pending entry's timer + map slot if the
+    transport `send()` throws (e.g. a broken stdin pipe), then rethrows. Without
+    this the timer leaked for the full request timeout (~10 min for ACP) and the
+    orphaned request promise later rejected unhandled.
+
 ## 0.1.4
 
 ### Patch Changes

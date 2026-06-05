@@ -141,4 +141,54 @@ describe("JsonRpcConnection", () => {
     fake.triggerClose(new Error("pipe died"));
     await expect(p).rejects.toThrow(/pipe died/);
   });
+
+  it("includes the error `data` payload in the rejection message", async () => {
+    const fake = new FakeTransport();
+    const conn = new JsonRpcConnection(fake, 1000);
+    const p = conn.request("boom");
+    await tick();
+    const id = fake.sentEnvelope(0).id;
+    fake.inbound({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32000, message: "upstream failed", data: { provider: "exploded" } }
+    });
+    // Base message AND the structured data (often the nested provider error).
+    await expect(p).rejects.toThrow(/json-rpc error \(-32000\): upstream failed: .*"exploded"/);
+  });
+
+  it("truncates a huge error `data` payload to ~1000 chars", async () => {
+    const fake = new FakeTransport();
+    const conn = new JsonRpcConnection(fake, 1000);
+    const p = conn.request("boom");
+    await tick();
+    const id = fake.sentEnvelope(0).id;
+    fake.inbound({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32000, message: "big", data: "x".repeat(5000) }
+    });
+    const err = (await p.catch((e: unknown) => e)) as Error;
+    expect(err.message).toContain("...");
+    expect(err.message.length).toBeLessThan(1100);
+  });
+
+  it("clears the pending timer when the transport send throws (no leak / unhandled reject)", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = new FakeTransport();
+      fake.send = () => {
+        throw new Error("broken stdin pipe");
+      };
+      // A long, ACP-style timeout — the leaked timer would otherwise linger.
+      const conn = new JsonRpcConnection(fake, 600_000);
+      await expect(conn.request("doomed")).rejects.toThrow(/broken stdin pipe/);
+      // The pending entry's timer must have been cleared on send failure —
+      // otherwise it lingers for the full timeout and later fires an unhandled
+      // rejection on the orphaned request promise.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

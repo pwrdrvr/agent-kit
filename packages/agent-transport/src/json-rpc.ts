@@ -144,15 +144,29 @@ export class JsonRpcConnection {
       this.pending.set(id, { resolve, reject, timer });
     });
 
-    await this.sendEnvelope(
-      {
-        jsonrpc: "2.0",
-        id,
-        method,
-        params: params ?? {}
-      },
-      diagnostics
-    );
+    try {
+      await this.sendEnvelope(
+        {
+          jsonrpc: "2.0",
+          id,
+          method,
+          params: params ?? {}
+        },
+        diagnostics
+      );
+    } catch (error) {
+      // The send failed (e.g. a broken stdin pipe), so no response will ever
+      // arrive — tear down the pending entry's timer + map slot now, otherwise
+      // the timer leaks (up to the request timeout, ~10 min for ACP) and
+      // `requestPromise` later rejects unhandled. Rethrow so the caller still
+      // sees the send error.
+      const pending = this.pending.get(id);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pending.delete(id);
+      }
+      throw error;
+    }
 
     return await requestPromise;
   }
@@ -182,13 +196,7 @@ export class JsonRpcConnection {
       this.pending.delete(key);
 
       if (envelope.error) {
-        pending.reject(
-          new Error(
-            `json-rpc error (${envelope.error.code ?? "unknown"}): ${
-              envelope.error.message ?? "unknown error"
-            }`
-          )
-        );
+        pending.reject(new Error(formatJsonRpcError(envelope.error)));
         return;
       }
 
@@ -263,4 +271,34 @@ export class JsonRpcConnection {
       this.pending.delete(id);
     }
   }
+}
+
+/** Render a JSON-RPC error envelope for a rejection message, INCLUDING its
+ *  `data` payload when present (Codex/ACP carry structured detail there — often
+ *  the nested provider error). Without this, error logs/UI lose the most useful
+ *  part of the message. */
+function formatJsonRpcError(error: NonNullable<JsonRpcEnvelope["error"]>): string {
+  const base = `json-rpc error (${error.code ?? "unknown"}): ${
+    error.message ?? "unknown error"
+  }`;
+  if (error.data === undefined) {
+    return base;
+  }
+  return `${base}: ${formatJsonRpcErrorData(error.data)}`;
+}
+
+/** Serialize an error `data` payload for a message, truncated to ~1000 chars so
+ *  a huge payload can't blow up a log line. Strings pass through; bigints
+ *  stringify (JSON.stringify throws on them otherwise). */
+function formatJsonRpcErrorData(data: unknown): string {
+  const serialized =
+    typeof data === "string"
+      ? data
+      : JSON.stringify(data, (_key, value) =>
+          typeof value === "bigint" ? value.toString() : value
+        );
+  if (!serialized) {
+    return String(data);
+  }
+  return serialized.length > 1_000 ? `${serialized.slice(0, 997)}...` : serialized;
 }
