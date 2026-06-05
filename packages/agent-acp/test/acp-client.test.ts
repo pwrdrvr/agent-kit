@@ -318,6 +318,49 @@ describe("AcpAgentClient — lifecycle", () => {
     await client.close();
   });
 
+  it("auto-approves PER-THREAD MCP tools when the client has no default mcpServers (pooled client)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      now: () => 1,
+      // NO client-level mcpServers — a shared/pooled client attaches tools
+      // per-thread instead.
+      autoApproveConfiguredMcpTools: true
+    });
+    // Establish a session with PER-THREAD mcpServers, as the chat controller does.
+    await client.reopenThread({
+      threadId: "acp:gemini:pooled-1",
+      mcpServers: [{ name: "pwrsnap", command: "/x" }]
+    });
+    let handlerCalled = false;
+    client.onApprovalRequest(async () => {
+      handlerCalled = true;
+      return "denied";
+    });
+    const outcome = await transport.emitRequest(
+      "session/request_permission",
+      {
+        sessionId: "session-1",
+        toolCall: {
+          toolCallId: "mcp_pwrsnap_render_composite__1",
+          title: "render_composite (pwrsnap MCP Server)",
+          kind: "other"
+        },
+        options: [
+          { optionId: "proceed_always_server", name: "Allow all server tools", kind: "allow_always" },
+          { optionId: "cancel", name: "Reject", kind: "reject_once" }
+        ]
+      },
+      "req-pooled"
+    );
+    expect(outcome).toEqual({
+      outcome: { outcome: "selected", optionId: "proceed_always_server" }
+    });
+    expect(handlerCalled).toBe(false);
+    await client.close();
+  });
+
   it("does NOT auto-approve the agent's own tools; routes them with a resolved threadId", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpAgentClient({

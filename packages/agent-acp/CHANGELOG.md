@@ -1,5 +1,18 @@
 # @pwrdrvr/agent-acp
 
+## 0.6.1
+
+### Patch Changes
+
+- Fix MCP tool auto-approval for pooled/shared clients. `autoApproveConfiguredMcpTools`
+  matched the permission request's tool against the CLIENT-level `mcpServers`
+  default — but a shared client (one process per agent serving multiple surfaces)
+  attaches its tools PER-THREAD, so that default is empty and every MCP tool
+  request fell through to "no handler → cancelled". The client now tracks each
+  session's MCP server names and auto-approves against the union of the default +
+  all live sessions, so per-thread tools are approved. Verified live: Gemini's
+  tool call on a per-thread-MCP session is auto-approved, not cancelled.
+
 ## 0.6.0
 
 ### Minor Changes

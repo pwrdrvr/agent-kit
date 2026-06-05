@@ -146,6 +146,11 @@ type AcpSessionState = {
    *  enrichment client uses), then clear it. `undefined` once consumed / when
    *  the host supplied none. */
   pendingInstructions: string | undefined;
+  /** Names of the MCP servers attached to THIS session (per-thread, since one
+   *  shared client can serve surfaces with different tool sets). Used to
+   *  auto-approve this session's MCP tools even when the client carries no
+   *  client-level `mcpServers` default. */
+  mcpServerNames: string[];
 };
 
 const DEFAULT_CLIENT_NAME = "agent-kit";
@@ -431,7 +436,11 @@ export class AcpAgentClient implements AgentBackend {
       turnId: undefined,
       runtimeState: undefined,
       pendingTurn: undefined,
-      pendingInstructions: options.instructions
+      pendingInstructions: options.instructions,
+      // Remember the MCP servers attached to THIS session so its tools can be
+      // auto-approved even when the (pooled, shared) client has no client-level
+      // `mcpServers` default.
+      mcpServerNames: (options.mcpServers ?? this.defaultMcpServers).map((server) => server.name)
     };
     this.sessions.set(threadId, session);
     this.threadIdByProtocolId.set(protocolSessionId, threadId);
@@ -734,6 +743,17 @@ export class AcpAgentClient implements AgentBackend {
     throw new Error(`Unsupported ACP request: ${method}`);
   }
 
+  /** Every MCP server name this client knows about — the client-level default
+   *  plus the per-thread servers of every live session. Used to auto-approve a
+   *  configured MCP tool regardless of which session's permission request it is. */
+  private knownMcpServerNames(): string[] {
+    const names = new Set(this.defaultMcpServers.map((server) => server.name));
+    for (const session of this.sessions.values()) {
+      for (const name of session.mcpServerNames) names.add(name);
+    }
+    return [...names];
+  }
+
   private async handlePermissionRequest(
     params: Record<string, unknown>,
     id?: JsonRpcId
@@ -750,12 +770,12 @@ export class AcpAgentClient implements AgentBackend {
     // prompt to call them — and approving here, without a host round-trip, also
     // sidesteps approval routing when `sessionId` can't be mapped to a thread.
     // The agent's OWN tools (shell/file/web) fall through to the host handler.
+    // The server names come from BOTH the client default AND every live session
+    // (per-thread mcpServers), since a pooled/shared client carries no
+    // client-level default.
     if (
       this.autoApproveConfiguredMcpTools &&
-      permissionTargetsConfiguredMcpServer(
-        params,
-        this.defaultMcpServers.map((server) => server.name)
-      )
+      permissionTargetsConfiguredMcpServer(params, this.knownMcpServerNames())
     ) {
       return autoApprovePermissionOutcome(options);
     }
