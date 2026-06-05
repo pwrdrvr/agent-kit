@@ -292,6 +292,20 @@ describe("ChatThreadController", () => {
     expect(user?.text).toBe("hello");
   });
 
+  it("registers single backend handlers by default", () => {
+    const { client } = makeController();
+    expect(client.toolCb).not.toBeNull();
+    expect(client.approvalCb).not.toBeNull();
+  });
+
+  it("skips single-handler registration when backendClientShared (no sibling clobber)", () => {
+    const { client } = makeController({ backendClientShared: true });
+    // The shared (pooled) client's own policy owns tool/approval handling; this
+    // controller must NOT register over a sibling controller's handlers.
+    expect(client.toolCb).toBeNull();
+    expect(client.approvalCb).toBeNull();
+  });
+
   it("uses createDeferredThread (no eager spawn) when the backend provides it", async () => {
     const { controller, client } = makeController();
     const deferred = vi.fn(async (_opts: unknown) => ({

@@ -137,6 +137,11 @@ export type ChatThreadControllerDeps<TSettings = unknown> = {
    *  (different surfaces pass different servers). Ignored by backends without
    *  `reopenThread` (Codex). */
   threadMcpServers?: readonly unknown[];
+  /** Set when this controller shares its backend `client` with OTHER
+   *  controllers (a pooled, per-process ACP agent). The controller then skips
+   *  the single-handler `onToolCall`/`onApprovalRequest` registrations to avoid
+   *  clobbering a sibling — the shared client owns the permission policy. */
+  backendClientShared?: boolean;
   /** Reasoning effort for turns. Defaults to "medium". */
   effort?: string;
   /** Default model id for thread/start (host's per-surface default). Omit for Codex default. */
@@ -225,9 +230,18 @@ export class ChatThreadController<TSettings = unknown> {
     if (this.wired) return;
     this.wired = true;
     const { client } = this.deps;
+    // `onEvent` is multi-subscriber (a Set), so it's always safe to add.
     client.onEvent((event) => this.onBackendEvent(event));
-    client.onToolCall((call) => this.onToolCall(call));
-    client.onApprovalRequest((method, params) => this.onApprovalRequest(method, params));
+    // `onToolCall`/`onApprovalRequest` register a SINGLE handler on the client.
+    // When the SAME client instance is shared across surfaces (an ACP agent
+    // pooled per process), a second controller's registration would CLOBBER the
+    // first. Such a host opts out (`backendClientShared`) and instead relies on
+    // the client's own permission policy (auto-approve its trusted MCP tools,
+    // deny the agent's own tools) — no per-surface handler to fight over.
+    if (this.deps.backendClientShared !== true) {
+      client.onToolCall((call) => this.onToolCall(call));
+      client.onApprovalRequest((method, params) => this.onApprovalRequest(method, params));
+    }
   }
 
   private now(): number {

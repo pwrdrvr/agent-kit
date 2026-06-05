@@ -1,5 +1,18 @@
 # @pwrdrvr/agent-client
 
+## 0.6.0
+
+### Minor Changes
+
+- `ChatThreadController` `backendClientShared` opt-out. `onToolCall`/
+  `onApprovalRequest` register a SINGLE handler on the backend client, so two
+  controllers sharing one client (a pooled per-process ACP agent serving multiple
+  surfaces) would clobber each other. Set `backendClientShared: true` to skip those
+  registrations — the shared client owns the permission policy (e.g. auto-approve
+  its trusted MCP tools, deny the agent's own tools, which the client does by
+  cancelling when no host handler is registered). `onEvent` is multi-subscriber and
+  is always wired.
+
 ## 0.5.0
 
 ### Minor Changes
