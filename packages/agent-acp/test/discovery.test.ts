@@ -293,6 +293,9 @@ describe("strategy table extensibility (KTD-A2)", () => {
     transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
     transport.finishPrompt();
     await turn;
+    // startTurn resolves at turn START; the terminal agent_message streams when
+    // the prompt settles, so flush a macrotask before asserting on it.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(events.some((e) => e.kind === "agent_message" && e.message.text === "ok")).toBe(true);
   });
 });

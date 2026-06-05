@@ -1,5 +1,28 @@
 # @pwrdrvr/agent-acp
 
+## 0.2.0
+
+### Minor Changes
+
+- ACP turns now resolve at turn START, not turn end, and chat agents receive the
+  host system prompt.
+
+  - **Non-blocking `startTurn`**: `AcpAgentClient.startTurn`/`startTurnNative` now
+    return as soon as the turn is registered (after `turn_started`) and stream the
+    terminal events (`token_usage`, `agent_message`, `turn_completed`/`error`)
+    asynchronously when `session/prompt` settles. Previously `startTurn` awaited
+    the whole turn, so any host gating UI on it (a chat composer) froze for the
+    entire turn — and a slow/large session `cwd` read as a hang. Now matches the
+    Codex backend's fire-then-stream contract. Turn failures arrive as
+    `turn_completed{status:"failed"}` + `error` events instead of a `startTurn`
+    rejection. `AcpOneShotClient.run` updated to await `turn_completed`; `close()`
+    awaits any in-flight turn so teardown never orphans one.
+  - **System prompt for ACP chat**: `startThread({ instructions })` is no longer
+    dropped — ACP has no `session/new` baseInstructions seam, so the instructions
+    are folded into the FIRST turn's prompt as a leading text block (consumed
+    once). ACP chat agents previously ran with no host system prompt / persona /
+    anchor context.
+
 ## 0.1.9
 
 ### Patch Changes

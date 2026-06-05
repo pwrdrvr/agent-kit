@@ -120,16 +120,24 @@ export class AcpOneShotClient {
     let finalText = "";
     const deltas: string[] = [];
     let usage: NormalizedTokenUsage | null = null;
+    let turnError: string | null = null;
+    // `startTurn` now resolves at turn START (it streams terminal events
+    // asynchronously), so we gate completion on the `turn_completed` event for
+    // this thread rather than on `startTurn` resolving.
+    let settle: (status: string) => void = () => undefined;
+    const done = new Promise<string>((resolve) => {
+      settle = resolve;
+    });
     const unsubscribe = this.client.onEvent((event: NormalizedThreadEvent) => {
       if (!("threadId" in event) || event.threadId !== thread.threadId) return;
       if (event.kind === "agent_message") finalText = event.message.text;
       else if (event.kind === "agent_message_delta") deltas.push(event.delta);
       else if (event.kind === "token_usage") usage = event.usage;
+      else if (event.kind === "error") turnError = event.message;
+      else if (event.kind === "turn_completed") settle(event.status);
     });
 
     try {
-      // `startTurn` resolves AT turn end — by then the terminal `agent_message`
-      // (full text) and `turn_completed` have already been emitted + captured.
       const { turnId } = await this.client.startTurn({
         threadId: thread.threadId,
         input: {
@@ -140,6 +148,10 @@ export class AcpOneShotClient {
         },
         ...(request.effort !== undefined ? { reasoning: request.effort } : {})
       });
+      const status = await done;
+      if (status !== "completed") {
+        throw new Error(turnError ?? `ACP one-shot turn ${status}`);
+      }
       const rawText = finalText.length > 0 ? finalText : deltas.join("");
       return {
         rawText,

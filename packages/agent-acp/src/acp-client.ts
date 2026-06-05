@@ -126,6 +126,18 @@ type AcpSessionState = {
   normalizer: AcpSessionNormalizer;
   turnId: string | undefined;
   runtimeState: AcpSessionRuntimeState | undefined;
+  /** The in-flight `session/prompt` completion chain for the active turn.
+   *  `startTurnNative` resolves at turn START and streams terminal events from
+   *  this chain when the request settles; `undefined` between turns. Awaited by
+   *  `close()` so teardown doesn't orphan a running turn. The chain is
+   *  `.catch`-terminated, so it never rejects. */
+  pendingTurn: Promise<void> | undefined;
+  /** System prompt captured from the neutral `startThread({ instructions })`.
+   *  ACP has no `session/new` baseInstructions seam, so we fold it into the
+   *  FIRST turn's prompt as a leading text block (same approach the one-shot
+   *  enrichment client uses), then clear it. `undefined` once consumed / when
+   *  the host supplied none. */
+  pendingInstructions: string | undefined;
 };
 
 const DEFAULT_CLIENT_NAME = "agent-kit";
@@ -243,7 +255,6 @@ export class AcpAgentClient implements AgentBackend {
   ): Promise<AgentBackendStartThreadResult> {
     const ignored: string[] = [];
     for (const key of [
-      "instructions",
       "approvalPolicy",
       "sandbox",
       "config",
@@ -264,6 +275,14 @@ export class AcpAgentClient implements AgentBackend {
     const native: AcpStartThreadOptions = {};
     if (options.cwd !== undefined) native.cwd = options.cwd;
     const result = await this.startThreadNative(native);
+    // ACP has no `session/new` system-prompt seam, so stash the host's
+    // `instructions` and fold them into the first turn's prompt (below). Without
+    // this an ACP chat agent runs with NO host system prompt / persona / anchor
+    // context — just its own CLI harness prompt.
+    if (typeof options.instructions === "string" && options.instructions.length > 0) {
+      const session = this.sessions.get(result.threadId);
+      if (session) session.pendingInstructions = options.instructions;
+    }
     if (options.model !== undefined) {
       await this.setModel(result.threadId, options.model).catch((cause) => {
         this.logger.debug("acp startThread: model selection not applied", {
@@ -312,7 +331,9 @@ export class AcpAgentClient implements AgentBackend {
       protocolSessionId,
       normalizer: new AcpSessionNormalizer({ quirks: this.strategy.quirks }),
       turnId: undefined,
-      runtimeState: undefined
+      runtimeState: undefined,
+      pendingTurn: undefined,
+      pendingInstructions: undefined
     };
     this.sessions.set(threadId, session);
     this.threadIdByProtocolId.set(protocolSessionId, threadId);
@@ -345,9 +366,15 @@ export class AcpAgentClient implements AgentBackend {
    * IGNORED (debug-logged).
    */
   async startTurn(options: AgentStartTurnOptions): Promise<{ turnId: string }> {
-    const promptContent: AcpPromptContentBlock[] = [
-      { type: "text", text: options.input.text }
-    ];
+    const promptContent: AcpPromptContentBlock[] = [];
+    // Fold the host system prompt (captured at startThread) into the FIRST turn
+    // as a leading text block — ACP has no baseInstructions seam. Consumed once.
+    const session = this.sessions.get(options.threadId);
+    if (session?.pendingInstructions !== undefined) {
+      promptContent.push({ type: "text", text: session.pendingInstructions });
+      session.pendingInstructions = undefined;
+    }
+    promptContent.push({ type: "text", text: options.input.text });
     for (const imagePath of options.input.imagePaths ?? []) {
       const block = await this.imageBlockFromPath(imagePath).catch((cause) => {
         this.logger.debug("acp startTurn: skipping unreadable image", {
@@ -385,55 +412,64 @@ export class AcpAgentClient implements AgentBackend {
       options.promptContent ??
       textPrompt(options.prompt ?? "");
 
-    let promptResult: unknown;
-    try {
-      promptResult = await this.transport.request(
+    // Resolve at turn START, not turn END. ACP's `session/prompt` resolves only
+    // when the whole turn is done (assistant chunks arrive as `session/update`
+    // notifications WHILE the request is in flight). Awaiting it here would make
+    // `startTurn` block for the entire turn — violating the `AgentBackend`
+    // contract (Codex resolves at turn start) and freezing any host UI that
+    // gates on `startTurn` (e.g. a chat composer waiting to clear). Instead we
+    // fire the request and stream its terminal events (token_usage,
+    // agent_message, turn_completed/error) asynchronously when it settles.
+    session.pendingTurn = this.transport
+      .request(
         "session/prompt",
         {
           sessionId: session.protocolSessionId,
           prompt
         },
         ACP_PROMPT_REQUEST_TIMEOUT_MS
-      );
-    } catch (error) {
-      session.turnId = undefined;
-      this.emit({
-        kind: "turn_completed",
-        threadId: session.threadId,
-        turnId,
-        status: "failed"
+      )
+      .then((promptResult) => {
+        // Token usage rides on the `session/prompt` RESPONSE (`_meta.quota`),
+        // not a session/update — emit it so hosts can account for ACP turns the
+        // same way they do Codex turns.
+        const usage = readAcpPromptUsage(promptResult);
+        if (usage) {
+          this.emit({ kind: "token_usage", threadId: session.threadId, turnId, usage });
+        }
+        // Flush any in-flight assistant bubble into a terminal agent_message.
+        for (const event of session.normalizer.finalizeAssistantMessage({
+          threadId: session.threadId,
+          turnId
+        })) {
+          this.emit(event);
+        }
+        session.turnId = undefined;
+        session.pendingTurn = undefined;
+        this.emit({
+          kind: "turn_completed",
+          threadId: session.threadId,
+          turnId,
+          status: "completed"
+        });
+      })
+      .catch((error) => {
+        session.turnId = undefined;
+        session.pendingTurn = undefined;
+        this.emit({
+          kind: "turn_completed",
+          threadId: session.threadId,
+          turnId,
+          status: "failed"
+        });
+        this.emit({
+          kind: "error",
+          threadId: session.threadId,
+          turnId,
+          message: errorMessage(error)
+        });
       });
-      this.emit({
-        kind: "error",
-        threadId: session.threadId,
-        turnId,
-        message: errorMessage(error)
-      });
-      throw error;
-    }
 
-    // Token usage rides on the `session/prompt` RESPONSE (`_meta.quota`), not a
-    // session/update — emit it so hosts can account for ACP turns the same way
-    // they do Codex turns.
-    const usage = readAcpPromptUsage(promptResult);
-    if (usage) {
-      this.emit({ kind: "token_usage", threadId: session.threadId, turnId, usage });
-    }
-
-    // Flush any in-flight assistant bubble into a terminal agent_message.
-    for (const event of session.normalizer.finalizeAssistantMessage({
-      threadId: session.threadId,
-      turnId
-    })) {
-      this.emit(event);
-    }
-    session.turnId = undefined;
-    this.emit({
-      kind: "turn_completed",
-      threadId: session.threadId,
-      turnId,
-      status: "completed"
-    });
     return { turnId };
   }
 
@@ -471,10 +507,19 @@ export class AcpAgentClient implements AgentBackend {
     this.unsubscribeNotification = undefined;
     this.unsubscribeRequest?.();
     this.unsubscribeRequest = undefined;
+    // Snapshot in-flight turn chains before clearing sessions. Closing the
+    // transport rejects any pending `session/prompt`, which the chain's
+    // `.catch` turns into a terminal failed/error emit — await them so teardown
+    // doesn't leave a turn settling after `close()` resolves. The chains never
+    // reject (they're `.catch`-terminated), so `allSettled` is belt-and-braces.
+    const pending = [...this.sessions.values()]
+      .map((s) => s.pendingTurn)
+      .filter((p): p is Promise<void> => p !== undefined);
     this.sessions.clear();
     this.threadIdByProtocolId.clear();
     this.initialized = false;
     await this.transport.close?.();
+    if (pending.length > 0) await Promise.allSettled(pending);
   }
 
   // ---- internals ----

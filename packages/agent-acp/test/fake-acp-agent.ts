@@ -100,6 +100,12 @@ export class FakeAcpAgentTransport implements AcpJsonRpcTransport {
     this.pendingPrompt = undefined;
   }
 
+  /** Reject the in-flight session/prompt, failing the turn. */
+  failPrompt(error: Error = new Error("session/prompt failed")): void {
+    this.pendingPrompt?.reject(error);
+    this.pendingPrompt = undefined;
+  }
+
   hasPendingPrompt(): boolean {
     return this.pendingPrompt !== undefined;
   }

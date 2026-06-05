@@ -16,6 +16,14 @@ function makeClient(transport: FakeAcpAgentTransport, strategy = geminiStrategy)
   });
 }
 
+/** `startTurn` resolves at turn START and streams the terminal events
+ *  (agent_message, token_usage, turn_completed) asynchronously when the faked
+ *  `session/prompt` settles via `finishPrompt()`. Flush a macrotask so those
+ *  background emits land before assertions. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("AcpAgentClient — lifecycle", () => {
   it("initialize → session/new → session/prompt round-trips", async () => {
     const transport = new FakeAcpAgentTransport();
@@ -35,6 +43,7 @@ describe("AcpAgentClient — lifecycle", () => {
     });
     transport.finishPrompt();
     await turnPromise;
+    await flush();
 
     // ACP verbs sent in order.
     expect(transport.requests.map((r) => r.method)).toEqual([
@@ -57,6 +66,34 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(final).toMatchObject({ message: { role: "assistant", text: "Hi there." } });
     const completed = events.find((e) => e.kind === "turn_completed");
     expect(completed).toMatchObject({ status: "completed" });
+  });
+
+  it("folds startThread instructions into the FIRST turn prompt, once", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread({
+      cwd: "/repo",
+      instructions: "SYSTEM: you are PwrSnap's editor assistant."
+    });
+
+    // First turn: prompt is [instructions block, user text].
+    await client.startTurn({ threadId, input: { text: "delete the arrow" } });
+    transport.finishPrompt();
+    await flush();
+    const firstPrompt = transport.requests.filter((r) => r.method === "session/prompt")[0]
+      ?.params as { prompt: Array<{ type: string; text: string }> };
+    expect(firstPrompt.prompt.map((b) => b.text)).toEqual([
+      "SYSTEM: you are PwrSnap's editor assistant.",
+      "delete the arrow"
+    ]);
+
+    // Second turn: instructions are NOT repeated (the session already has them).
+    await client.startTurn({ threadId, input: { text: "now make it blue" } });
+    transport.finishPrompt();
+    await flush();
+    const secondPrompt = transport.requests.filter((r) => r.method === "session/prompt")[1]
+      ?.params as { prompt: Array<{ type: string; text: string }> };
+    expect(secondPrompt.prompt.map((b) => b.text)).toEqual(["now make it blue"]);
   });
 
   it("surfaces session/request_permission to the registered approval handler", async () => {
@@ -142,7 +179,54 @@ describe("AcpAgentClient — lifecycle", () => {
     });
     transport.finishPrompt();
     await turn;
+    await flush();
     expect(events.some((e) => e.kind === "agent_message_delta" && e.delta === "routed")).toBe(true);
+  });
+
+  it("resolves startTurn at turn START, before turn_completed (non-blocking)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread();
+
+    const order: string[] = [];
+    client.onEvent((event) => {
+      if (event.kind === "turn_completed") order.push("turn_completed");
+    });
+
+    await client.startTurn({ threadId, input: { text: "hi" } });
+    // startTurn has resolved but the prompt has NOT been finished — so the turn
+    // is still in flight and turn_completed has not fired. This is the property
+    // that keeps a chat composer from freezing for the whole turn.
+    order.push("startTurn_resolved");
+    expect(transport.hasPendingPrompt()).toBe(true);
+    expect(order).toEqual(["startTurn_resolved"]);
+
+    transport.finishPrompt();
+    await flush();
+    expect(order).toEqual(["startTurn_resolved", "turn_completed"]);
+  });
+
+  it("streams a failed turn_completed + error when the prompt rejects (no throw from startTurn)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread();
+
+    const events: NormalizedThreadEvent[] = [];
+    client.onEvent((event) => events.push(event));
+
+    // startTurn resolves even though the turn will fail — the failure arrives
+    // asynchronously as events, not as a startTurn rejection.
+    await expect(
+      client.startTurn({ threadId, input: { text: "boom" } })
+    ).resolves.toMatchObject({ turnId: expect.any(String) });
+
+    transport.failPrompt(new Error("agent exploded"));
+    await flush();
+
+    const completed = events.find((e) => e.kind === "turn_completed");
+    expect(completed).toMatchObject({ status: "failed" });
+    const error = events.find((e) => e.kind === "error");
+    expect(error).toMatchObject({ message: expect.stringContaining("agent exploded") });
   });
 
   it("routes Grok's vendor notification through the same path and emits a title", async () => {
