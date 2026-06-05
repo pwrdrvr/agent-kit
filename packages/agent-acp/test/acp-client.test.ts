@@ -78,8 +78,11 @@ describe("AcpAgentClient — lifecycle", () => {
     const b1 = (await b.startThread()).threadId;
     expect(new Set([a1, a2, b1]).size).toBe(3); // all distinct
     expect(a1).not.toBe("acp:gemini:1");
-    expect(a1).toMatch(/^acp:gemini:[0-9a-f]+-1$/); // <instance>-<seq>
-    expect(a2).toMatch(/^acp:gemini:[0-9a-f]+-2$/);
+    // acp:<strategy>:<uuid> — a host-minted UUID, not a counter.
+    const UUID = /^acp:gemini:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    expect(a1).toMatch(UUID);
+    expect(a2).toMatch(UUID);
+    expect(b1).toMatch(UUID);
     await a.close();
     await b.close();
   });

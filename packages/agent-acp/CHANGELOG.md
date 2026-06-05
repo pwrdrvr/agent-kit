@@ -1,5 +1,15 @@
 # @pwrdrvr/agent-acp
 
+## 0.2.3
+
+### Patch Changes
+
+- Use a host-minted UUID for the ACP thread id (`acp:<strategy>:<uuid>`) instead
+  of the `<instance>-<seq>` scheme from the previous patch. ACP returns a session
+  GUID (`sessionId`), which the client keeps as the wire-routing id; the
+  host-facing `threadId` is now `randomUUID()` — globally unique regardless of how
+  (or whether) a given agent makes its session id unique, and no integer counter.
+
 ## 0.2.2
 
 ### Patch Changes

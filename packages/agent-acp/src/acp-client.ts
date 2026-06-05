@@ -32,7 +32,7 @@ import {
   type Unsubscribe
 } from "@pwrdrvr/agent-core";
 import { mkdirSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 import type { JsonRpcId } from "@pwrdrvr/agent-transport";
@@ -175,14 +175,6 @@ export class AcpAgentClient implements AgentBackend {
   private unsubscribeRequest: (() => void) | undefined = undefined;
   private initialized = false;
   private runtimeCapabilities?: AcpRuntimeCapabilities;
-  private threadSequence = 0;
-  /** Per-CLIENT-INSTANCE random base for thread ids. The bare `++sequence`
-   *  counter alone resets to 1 for every new client and every process restart,
-   *  so `acp:gemini:1` collided across runs/instances — fatal for any host that
-   *  persists threads under a UNIQUE thread id. Mixing in a random instance id
-   *  makes `acp:<id>:<instance>-<seq>` globally unique while staying monotonic
-   *  (and distinct) within one client. */
-  private readonly instanceId = randomBytes(6).toString("hex");
 
   constructor(options: AcpAgentClientOptions) {
     this.transport = options.transport;
@@ -342,7 +334,13 @@ export class AcpAgentClient implements AgentBackend {
     if (!protocolSessionId) {
       throw new Error("ACP session/new did not return a session id");
     }
-    const threadId = `acp:${this.strategy.id}:${this.instanceId}-${++this.threadSequence}`;
+    // Host-minted UUID, NOT a counter. ACP returns a session GUID
+    // (`protocolSessionId`, used below for wire routing), but the host-facing
+    // `threadId` is our own handle — a per-thread `randomUUID()` is globally
+    // unique regardless of how (or whether) a given agent makes its session id
+    // unique, so hosts persisting threads under a UNIQUE id never collide
+    // across threads, client instances, or process restarts.
+    const threadId = `acp:${this.strategy.id}:${randomUUID()}`;
     const session: AcpSessionState = {
       threadId,
       protocolSessionId,
