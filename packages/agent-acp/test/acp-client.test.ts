@@ -203,6 +203,38 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(outcome).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
   });
 
+  it("reopenThread rebinds a fresh session to a persisted thread id (resume after restart)", async () => {
+    const transport = new FakeAcpAgentTransport({
+      "session/new": { sessionId: "11111111-1111-1111-1111-111111111111" }
+    });
+    const client = makeClient(transport);
+    // A thread persisted from a previous run — this fresh client has no session
+    // for it (the agent process, and its session, died with the old run).
+    const persisted = "acp:gemini:52765539-723e-4955-8330-c3daa0322b72";
+    await client.reopenThread({ threadId: persisted, buildInstructions: () => "SYSTEM PROMPT" });
+
+    // A turn on that thread now works (no "Unknown ACP thread") and the first
+    // prompt carries the re-applied system prompt.
+    await client.startTurn({ threadId: persisted, input: { text: "continue" } });
+    transport.finishPrompt();
+    await flush();
+    const prompt = transport.requests.filter((r) => r.method === "session/prompt")[0]
+      ?.params as { prompt: Array<{ text: string }> };
+    expect(prompt.prompt.map((b) => b.text)).toEqual(["SYSTEM PROMPT", "continue"]);
+    await client.close();
+  });
+
+  it("reopenThread is a no-op when the session is already live", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread();
+    const before = transport.requests.filter((r) => r.method === "session/new").length;
+    await client.reopenThread({ threadId });
+    const after = transport.requests.filter((r) => r.method === "session/new").length;
+    expect(after).toBe(before);
+    await client.close();
+  });
+
   it("uses the agent's session GUID as the thread id when it is a UUID", async () => {
     const uuid = "836a1942-8a8e-4c8d-9744-497242519df5";
     const transport = new FakeAcpAgentTransport({ "session/new": { sessionId: uuid } });

@@ -39,6 +39,9 @@ class FakeBackend {
   archiveThread = vi.fn(async (_threadId: string) => undefined);
   clearThreadGitInfo = vi.fn(async (_threadId: string) => undefined);
   close = vi.fn(async () => undefined);
+  reopenThread = vi.fn(
+    async (_opts: { threadId: string; buildInstructions?: () => string }) => undefined
+  );
   private threadCounter = 0;
   private turnCounter = 0;
 
@@ -277,6 +280,21 @@ describe("ChatThreadController", () => {
     expect(assistant?.text).toBe("Hi there");
     const user = history.find((m) => m.role === "user");
     expect(user?.text).toBe("hello");
+  });
+
+  it("re-establishes an ACP-style backend session (reopenThread) before each turn", async () => {
+    const { controller, client } = makeController();
+    const view = await controller.createThread({ name: "T" });
+    const tid = view.threadId;
+    await controller.sendMessage({ threadId: tid, text: "resume me" });
+    // The controller ensures the backend has a live session for the (possibly
+    // persisted) thread, passing the thread id + the rebuilt system prompt.
+    expect(client.reopenThread).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: tid, buildInstructions: expect.any(Function) })
+    );
+    // The builder lazily yields the system prompt only if the backend re-opens.
+    const passed = client.reopenThread.mock.calls[0]?.[0];
+    expect(passed?.buildInstructions?.()).toBe("SYSTEM");
   });
 
   it("broadcasts a streamed (ACP) tool_call only once it reaches a terminal status", async () => {

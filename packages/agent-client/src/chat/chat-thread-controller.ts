@@ -453,6 +453,28 @@ export class ChatThreadController<TSettings = unknown> {
     const turnInput: AgentTurnInput = { text: turnText };
     if (input.imagePaths !== undefined) turnInput.imagePaths = input.imagePaths;
 
+    // ACP-style backends keep their session IN-PROCESS, so a thread persisted
+    // across an app restart has no live backend session ("Unknown ACP thread"
+    // on the next turn). Re-establish one bound to the SAME thread id, with the
+    // system prompt re-applied, before starting the turn. No-op for backends
+    // that persist threads server-side (Codex) — they don't implement this seam.
+    const reopenable = this.deps.client as {
+      reopenThread?: (options: {
+        threadId: string;
+        buildInstructions?: () => string;
+      }) => Promise<void>;
+    };
+    if (typeof reopenable.reopenThread === "function") {
+      // Lazy: the backend only builds the prompt if it actually re-establishes
+      // a session (skipped when the session is still live), so a normal turn
+      // doesn't rebuild the system prompt.
+      await reopenable.reopenThread({
+        threadId,
+        buildInstructions: () =>
+          this.deps.buildSystemPrompt({ settings: settingsSnapshot, anchorId: anchorForTurn })
+      });
+    }
+
     const startTurnOptions: AgentStartTurnOptions = {
       threadId,
       input: turnInput,

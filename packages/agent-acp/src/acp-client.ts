@@ -309,6 +309,45 @@ export class AcpAgentClient implements AgentBackend {
   async startThreadNative(
     options: AcpStartThreadOptions = {}
   ): Promise<AgentBackendStartThreadResult> {
+    return this.establishSession({
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {})
+    });
+  }
+
+  /**
+   * Re-establish a fresh ACP session for a PERSISTED thread id whose underlying
+   * session is gone (e.g. resuming a chat after an app restart — the agent
+   * process, and its in-memory session, died with the previous run). ACP
+   * sessions don't survive a process restart the way a Codex thread does, so a
+   * host that persists threads must rebind them. No-op when the session is still
+   * live. The conversation starts fresh on the agent side (prior turns aren't
+   * replayed), but the host keeps the visible transcript and the system prompt
+   * is re-applied to the first turn.
+   */
+  async reopenThread(options: {
+    threadId: string;
+    /** Built ONLY when a re-establish actually happens (skipped for a live
+     *  session), so the host doesn't rebuild the system prompt every turn. */
+    buildInstructions?: () => string;
+  }): Promise<void> {
+    if (this.sessions.has(options.threadId)) return;
+    const instructions = options.buildInstructions?.();
+    await this.establishSession({
+      bindThreadId: options.threadId,
+      ...(instructions !== undefined ? { instructions } : {})
+    });
+  }
+
+  /** Shared `session/new` + session registration. Mints a new thread id unless
+   *  `bindThreadId` is given (resume), in which case the new ACP session is
+   *  bound to that existing host thread id. */
+  private async establishSession(options: {
+    cwd?: string;
+    mcpServers?: AcpMcpServerConfig[];
+    bindThreadId?: string;
+    instructions?: string;
+  }): Promise<AgentBackendStartThreadResult> {
     await this.initialize();
     const cwd = options.cwd ?? this.defaultCwd ?? process.cwd();
     // Ensure the session workspace exists. ACP agents use `cwd` as their
@@ -348,9 +387,11 @@ export class AcpAgentClient implements AgentBackend {
     // session) — but ONLY when it's a well-formed UUID. Many agents return a
     // proper UUID; if one returns a counter / opaque token instead, fall back
     // to a host-minted `randomUUID()` so our id is globally unique regardless of
-    // the agent's choice. Never a plain integer counter.
-    const threadIdSuffix = isUuid(protocolSessionId) ? protocolSessionId : randomUUID();
-    const threadId = `acp:${this.strategy.id}:${threadIdSuffix}`;
+    // the agent's choice. Never a plain integer counter. On resume, bind to the
+    // caller's existing thread id instead of minting one.
+    const threadId =
+      options.bindThreadId ??
+      `acp:${this.strategy.id}:${isUuid(protocolSessionId) ? protocolSessionId : randomUUID()}`;
     const session: AcpSessionState = {
       threadId,
       protocolSessionId,
@@ -358,7 +399,7 @@ export class AcpAgentClient implements AgentBackend {
       turnId: undefined,
       runtimeState: undefined,
       pendingTurn: undefined,
-      pendingInstructions: undefined
+      pendingInstructions: options.instructions
     };
     this.sessions.set(threadId, session);
     this.threadIdByProtocolId.set(protocolSessionId, threadId);
@@ -374,7 +415,11 @@ export class AcpAgentClient implements AgentBackend {
       this.emitThreadSettings(session, runtimeCapabilities, runtimeState);
     }
 
-    this.logger.debug("acp thread started", { threadId, protocolSessionId });
+    this.logger.debug("acp thread started", {
+      threadId,
+      protocolSessionId,
+      resumed: options.bindThreadId !== undefined
+    });
     const out: AgentBackendStartThreadResult = { threadId };
     const model = runtimeCapabilities?.models?.currentModelId;
     if (model !== undefined) out.model = model;

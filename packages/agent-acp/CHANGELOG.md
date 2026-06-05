@@ -1,5 +1,26 @@
 # @pwrdrvr/agent-acp
 
+## 0.4.0
+
+### Minor Changes
+
+- Resume ACP chat threads across process restarts. ACP sessions live in the agent
+  process, so a host that persists threads (e.g. across an app relaunch) hit
+  "Unknown ACP thread" on the next turn — the in-memory session was gone.
+
+  - `AcpAgentClient.reopenThread({ threadId, buildInstructions? })` re-establishes
+    a fresh ACP session BOUND to the existing host thread id (no-op when the
+    session is already live). The system prompt is re-applied to the next turn;
+    `buildInstructions` is a lazy callback so the host only rebuilds the prompt
+    when a re-establish actually happens. The agent starts fresh (prior turns
+    aren't replayed) but the host keeps the visible transcript.
+  - `ChatThreadController.sendMessage` calls `reopenThread` (when the backend
+    implements it) before each turn, so a persisted ACP thread transparently
+    re-opens. No-op for backends that persist threads server-side (Codex).
+
+  Verified live: a fresh client resumes a persisted Gemini thread and completes a
+  turn.
+
 ## 0.3.1
 
 ### Patch Changes
