@@ -23,10 +23,15 @@ export type LocalAcpAgentProbe = (
 export type AcpDiscoveryProbe = {
   /** Args that print a version (probed first; failure = not installed). */
   versionArgs: string[];
-  /** Args that print help/usage text the `helpMatches` regex confirms ACP support against. */
+  /** Args probed to confirm ACP support. When `helpMatches` is set the OUTPUT
+   *  must match it; when omitted, a SUCCESSFUL probe (exit 0) is itself the
+   *  signal — for args that are an ACP subcommand whose mere existence proves
+   *  capability (e.g. `kimi acp --help`). */
   helpArgs: string[];
-  /** Regex the help/usage output must match for the agent to count as ACP-capable. */
-  helpMatches: RegExp;
+  /** Regex the help/usage output must match for the agent to count as
+   *  ACP-capable. OMIT to rely on the help probe's EXIT CODE instead — more
+   *  robust than parsing help prose, which drifts across CLI versions. */
+  helpMatches?: RegExp;
   /** Bare command name tried first. */
   command: string;
   /** Additional candidate command paths (Homebrew prefixes, `~/.<agent>/bin`, …). */

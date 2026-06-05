@@ -10,12 +10,12 @@ export const kimiStrategy: AcpAgentStrategy = {
   discoveryProbe: {
     command: "kimi",
     versionArgs: ["--version"],
+    // Capability signal is the EXIT CODE of `kimi acp --help`, NOT its prose.
+    // kimi's commander CLI exits non-zero for an unknown subcommand, so a
+    // zero-exit proves the `acp` subcommand exists. No `helpMatches`: the help
+    // wording has already drifted across kimi versions (0.11.0 prints "Agent
+    // Client Protocol (ACP) server over stdio"), so matching it is fragile.
     helpArgs: ["acp", "--help"],
-    // Real `kimi acp --help` (v0.11.0): "Run kimi-code as an Agent Client
-    // Protocol (ACP) server over stdio." The old /\bACP server\b/ never matched
-    // — "(ACP) server" has a paren between ACP and "server". Match the protocol
-    // name, or "ACP" loosely followed by "server".
-    helpMatches: /agent client protocol|\bacp\b[\s)]*server\b/i,
     // The official Kimi Code installer drops a standalone binary at
     // ~/.kimi-code/bin/kimi and does NOT add it to PATH — so a Finder-launched
     // app misses it without this fallback (mirrors grok/qwen).

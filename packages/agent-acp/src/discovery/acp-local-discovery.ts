@@ -163,7 +163,14 @@ async function discoverStrategyInstances(
     if (!versionResult || !helpResult) {
       continue;
     }
-    if (!strategy.discoveryProbe.helpMatches.test(resultText(helpResult))) {
+    // A strategy with no `helpMatches` relies on the EXIT CODE: the help probe
+    // succeeding (enforced just above — a non-zero exit makes `runProbe` return
+    // undefined) is itself the ACP-capability signal. Only when a regex is set
+    // do we additionally parse the (drift-prone) help text.
+    if (
+      strategy.discoveryProbe.helpMatches !== undefined &&
+      !strategy.discoveryProbe.helpMatches.test(resultText(helpResult))
+    ) {
       continue;
     }
     const version = parseCliVersion(resultText(versionResult));

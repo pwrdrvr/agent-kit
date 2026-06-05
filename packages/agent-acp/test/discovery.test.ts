@@ -57,16 +57,28 @@ describe("discoverLocalAcpAgents — strategy-driven", () => {
     expect(gemini.version).toBe("0.4.1");
   });
 
-  it("matches a help string with the agent's ACP subcommand even amid other text", async () => {
+  it("discovers kimi by the `acp --help` EXIT CODE, not its help prose (#645)", async () => {
+    // Help text contains NONE of the old ACP wording — a zero-exit `acp --help`
+    // alone proves the subcommand exists. kimi's help prose has drifted across
+    // versions, so matching it is fragile; the exit code generalizes.
     const probe = scriptedProbe({
-      kimi: {
-        version: "kimi version 2.0.0",
-        help: "kimi acp — start the ACP server\nOther flags: --foo --bar"
-      }
+      kimi: { version: "0.11.0", help: "totally different wording — nothing to match here" }
     });
     const agents = await discoverLocalAcpAgents({ probe, listExecutables: noPathScan });
     expect(agents.map((a) => a.strategyId)).toEqual(["kimi"]);
     expect(agents[0]?.args).toEqual(["acp"]);
+  });
+
+  it("rejects a kimi whose `acp --help` exits non-zero (no acp subcommand)", async () => {
+    // A binary named kimi that ISN'T ACP-capable: `--version` works, but
+    // `acp --help` is an unknown subcommand → non-zero exit → probe rejected.
+    const probe: LocalAcpAgentProbe = async (command, args) => {
+      if (command !== "kimi") throw new Error("command not found");
+      if (args.includes("--version")) return { stdout: "0.11.0" };
+      throw new Error("error: unknown command 'acp'"); // commander non-zero exit
+    };
+    const agents = await discoverLocalAcpAgents({ probe, listExecutables: noPathScan });
+    expect(agents.map((a) => a.strategyId)).not.toContain("kimi");
   });
 
   it("tries fallback command paths when the bare name is missing (Grok)", async () => {
@@ -78,11 +90,9 @@ describe("discoverLocalAcpAgents — strategy-driven", () => {
     expect(agents[0]?.command).toBe("/opt/homebrew/bin/grok");
   });
 
-  it("finds Kimi at its ~/.kimi-code/bin install path with the REAL acp --help text", async () => {
-    // The official Kimi Code installer (v0.11.0) drops a standalone binary here,
-    // does NOT add it to PATH, and its `acp --help` says "Agent Client Protocol
-    // (ACP) server over stdio" — regression guard for BOTH the missing fallback
-    // and the help-regex that never matched "(ACP) server".
+  it("finds Kimi at its ~/.kimi-code/bin install path when not on PATH", async () => {
+    // The official Kimi Code installer (v0.11.0) drops a standalone binary here
+    // and does NOT add it to PATH — regression guard for the fallback path.
     const kimiPath = path.join(homedir(), ".kimi-code", "bin", "kimi");
     const probe = scriptedProbe({
       [kimiPath]: {

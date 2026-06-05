@@ -1,5 +1,19 @@
 # @pwrdrvr/agent-acp
 
+## 0.3.1
+
+### Patch Changes
+
+- Detect Kimi by the `acp --help` exit code, not its help-text prose (mirrors
+  PwrAgent #645). kimi's commander CLI exits non-zero for an unknown subcommand,
+  so a zero-exit `kimi acp --help` already proves the `acp` subcommand exists —
+  and the kit's discovery already rejects a failed help probe. Parsing the help
+  wording was fragile: it has drifted across kimi versions (0.11.0 prints "Agent
+  Client Protocol (ACP) server over stdio"). `helpMatches` is now optional on a
+  strategy; the kimi strategy omits it and relies on the exit code. Gemini / Grok
+  / Qwen keep their regexes (they probe the general `--help`, which always exits
+  zero, so they still need the text to confirm `--acp` support).
+
 ## 0.3.0
 
 ### Minor Changes
