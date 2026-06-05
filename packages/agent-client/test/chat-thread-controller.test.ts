@@ -42,6 +42,12 @@ class FakeBackend {
   reopenThread = vi.fn(
     async (_opts: { threadId: string; buildInstructions?: () => string }) => undefined
   );
+  /** Set by a test to exercise the lazy-thread path; undefined by default so the
+   *  controller uses `startThread` (the existing behavior all other tests rely
+   *  on). */
+  createDeferredThread?: (
+    _opts: unknown
+  ) => Promise<{ threadId: string; modelProvider?: string }>;
   private threadCounter = 0;
   private turnCounter = 0;
 
@@ -280,6 +286,20 @@ describe("ChatThreadController", () => {
     expect(assistant?.text).toBe("Hi there");
     const user = history.find((m) => m.role === "user");
     expect(user?.text).toBe("hello");
+  });
+
+  it("uses createDeferredThread (no eager spawn) when the backend provides it", async () => {
+    const { controller, client } = makeController();
+    const deferred = vi.fn(async (_opts: unknown) => ({
+      threadId: "acp:gemini:deferred-1",
+      modelProvider: "gemini"
+    }));
+    client.createDeferredThread = deferred;
+    const view = await controller.createThread({ name: "T" });
+    expect(view.threadId).toBe("acp:gemini:deferred-1");
+    expect(deferred).toHaveBeenCalledTimes(1);
+    // The eager startThread (which would spawn the agent) is NOT called.
+    expect(client.startThread).not.toHaveBeenCalled();
   });
 
   it("re-establishes an ACP-style backend session (reopenThread) before each turn", async () => {

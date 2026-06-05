@@ -262,9 +262,21 @@ export class ChatThreadController<TSettings = unknown> {
       startOptions.environments = this.deps.threadEnvironments;
     }
 
+    // Backends that establish their session lazily (ACP — the agent process is
+    // spawned on the first turn via reopenThread) expose `createDeferredThread`
+    // to mint a thread id WITHOUT the multi-second spawn, so "New chat" is
+    // instant. Backends without it (Codex) open the thread eagerly as before.
+    const deferrable = this.deps.client as {
+      createDeferredThread?: (
+        options: AgentStartThreadOptions
+      ) => Promise<{ threadId: string } & Partial<ThreadModelState>>;
+    };
     let started: { threadId: string } & Partial<ThreadModelState>;
     try {
-      started = await this.deps.client.startThread(startOptions);
+      started =
+        typeof deferrable.createDeferredThread === "function"
+          ? await deferrable.createDeferredThread(startOptions)
+          : await this.deps.client.startThread(startOptions);
     } catch (cause) {
       await this.deps.store.discardPreparedThreadDir(preparedDir).catch(() => undefined);
       throw cause;

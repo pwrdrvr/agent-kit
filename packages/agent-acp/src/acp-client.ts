@@ -339,6 +339,24 @@ export class AcpAgentClient implements AgentBackend {
     });
   }
 
+  /**
+   * Mint a thread id WITHOUT spawning the agent or opening a session. The
+   * session is established lazily on the FIRST turn (via `reopenThread`, which
+   * the chat controller calls before each turn), so opening a new chat is
+   * instant — the multi-second agent spawn + `session/new` happens only when
+   * the user actually sends a message. Options are ignored (cwd/mcpServers come
+   * from the client defaults at establish time; instructions ride the first
+   * turn). The host id is a random UUID since there's no session GUID yet.
+   */
+  async createDeferredThread(
+    _options?: AgentStartThreadOptions
+  ): Promise<AgentBackendStartThreadResult> {
+    const threadId = `acp:${this.strategy.id}:${randomUUID()}`;
+    const out: AgentBackendStartThreadResult = { threadId };
+    out.modelProvider = this.strategy.id;
+    return out;
+  }
+
   /** Shared `session/new` + session registration. Mints a new thread id unless
    *  `bindThreadId` is given (resume), in which case the new ACP session is
    *  bound to that existing host thread id. */

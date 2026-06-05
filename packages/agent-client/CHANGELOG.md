@@ -1,5 +1,21 @@
 # @pwrdrvr/agent-client
 
+## 0.4.0
+
+### Minor Changes
+
+- Make "new chat" instant for ACP backends. Creating a chat thread eagerly called
+  `startThread`, which for ACP spawns the agent process + opens a session (~3-5s) —
+  so opening a new chat blocked for seconds before the user had even typed.
+
+  - `AcpAgentClient.createDeferredThread` mints a thread id WITHOUT spawning the
+    agent or opening a session. The session is established lazily on the first
+    turn (via the existing `reopenThread` seam the controller already calls), so
+    the multi-second spawn happens only when the user actually sends a message.
+  - `ChatThreadController.createThread` uses `createDeferredThread` when the
+    backend implements it; Codex (no such method) opens the thread eagerly as
+    before.
+
 ## 0.3.0
 
 ### Minor Changes

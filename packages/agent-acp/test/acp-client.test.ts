@@ -203,6 +203,24 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(outcome).toEqual({ outcome: { outcome: "selected", optionId: "deny" } });
   });
 
+  it("createDeferredThread mints an id WITHOUT spawning a session (instant new chat)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.createDeferredThread();
+    expect(threadId).toMatch(/^acp:gemini:[0-9a-f-]+$/);
+    // No agent spawn / session/new yet — deferred to the first turn.
+    expect(transport.requests.filter((r) => r.method === "session/new")).toHaveLength(0);
+
+    // The first turn (via reopenThread, as the chat controller does) establishes
+    // the session bound to that deferred id.
+    await client.reopenThread({ threadId, buildInstructions: () => "SYS" });
+    expect(transport.requests.filter((r) => r.method === "session/new")).toHaveLength(1);
+    await client.startTurn({ threadId, input: { text: "hi" } });
+    transport.finishPrompt();
+    await flush();
+    await client.close();
+  });
+
   it("reopenThread rebinds a fresh session to a persisted thread id (resume after restart)", async () => {
     const transport = new FakeAcpAgentTransport({
       "session/new": { sessionId: "11111111-1111-1111-1111-111111111111" }
