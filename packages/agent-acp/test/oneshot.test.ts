@@ -76,6 +76,14 @@ describe("AcpOneShotClient", () => {
     await client.close();
   });
 
+  it("listModels resolves to an array (empty when the agent advertises none)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const models = await client.listModels();
+    expect(Array.isArray(models)).toBe(true);
+    await client.close();
+  });
+
   it("rejects before start when already aborted", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });

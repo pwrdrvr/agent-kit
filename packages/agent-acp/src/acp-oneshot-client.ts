@@ -30,6 +30,7 @@ import {
 import { AcpAgentClient } from "./acp-client";
 import type { AcpJsonRpcTransport } from "./acp-stdio-transport";
 import type { AcpAgentStrategy } from "./strategies/strategy-types";
+import type { AcpRuntimeModel } from "./normalizer/runtime-capabilities";
 
 export type AcpOneShotClientOptions = {
   /** Connected (or lazily-connecting) ACP stdio transport for the agent. */
@@ -149,6 +150,34 @@ export class AcpOneShotClient {
         serviceTier: thread.serviceTier ?? null,
         tokenUsage: usage
       };
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  /** Open a throwaway session and read the agent's advertised models (ACP
+   *  agents report runtime capabilities — models/modes — on `session/new`).
+   *  Returns [] when the agent advertises none. Serialized with `run()`. */
+  async listModels(): Promise<AcpRuntimeModel[]> {
+    const run = this.queue.catch(() => undefined).then(() => this.listModelsInner());
+    this.queue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async listModelsInner(): Promise<AcpRuntimeModel[]> {
+    let models: AcpRuntimeModel[] = [];
+    const unsubscribe = this.client.onRuntimeCapabilities((event) => {
+      const observed = event.runtimeCapabilities.models?.availableModels;
+      if (observed !== undefined && observed.length > 0) models = observed;
+    });
+    try {
+      // `session/new` triggers the runtime-capabilities notification
+      // synchronously, so `models` is populated by the time this resolves.
+      await this.client.startThread();
+      return models;
     } finally {
       unsubscribe();
     }

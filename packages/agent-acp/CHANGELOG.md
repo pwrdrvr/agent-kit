@@ -1,5 +1,14 @@
 # @pwrdrvr/agent-acp
 
+## 0.1.6
+
+### Patch Changes
+
+- Add `AcpOneShotClient.listModels()` — opens a throwaway session and returns the
+  agent's advertised models (ACP agents report runtime models/modes on
+  `session/new`). Lets a host populate a model picker with the agent's real models
+  (e.g. Gemini's `gemini-2.5-pro`, `gemini-3-flash-preview`) instead of guessing.
+
 ## 0.1.5
 
 ### Patch Changes
