@@ -1,5 +1,15 @@
 # @pwrdrvr/agent-acp
 
+## 0.1.7
+
+### Patch Changes
+
+- Ensure the ACP session working directory exists before `session/new`. Agents use
+  `cwd` as their workspace; some (Gemini) fail `session/new` with an opaque
+  "-32603 Internal error" when it doesn't exist. `AcpAgentClient` now best-effort
+  `mkdir -p`s the cwd first, so a host passing a not-yet-created workspace dir
+  (e.g. a per-job scratch dir) works instead of failing cryptically.
+
 ## 0.1.6
 
 ### Patch Changes

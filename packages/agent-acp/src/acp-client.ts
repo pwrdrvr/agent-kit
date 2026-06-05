@@ -30,6 +30,7 @@ import {
   type NormalizedThreadSettings,
   type Unsubscribe
 } from "@pwrdrvr/agent-core";
+import { mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 import type { JsonRpcId } from "@pwrdrvr/agent-transport";
@@ -281,6 +282,18 @@ export class AcpAgentClient implements AgentBackend {
   ): Promise<AgentBackendStartThreadResult> {
     await this.initialize();
     const cwd = options.cwd ?? this.defaultCwd ?? process.cwd();
+    // Ensure the session workspace exists. ACP agents use `cwd` as their
+    // working directory; some (e.g. Gemini) fail `session/new` with an opaque
+    // "-32603 Internal error" when it doesn't exist. Best-effort — if the
+    // mkdir fails the agent surfaces its own error as before.
+    try {
+      mkdirSync(cwd, { recursive: true });
+    } catch (cause) {
+      this.logger.debug("acp session cwd ensure failed", {
+        cwd,
+        message: cause instanceof Error ? cause.message : String(cause)
+      });
+    }
     const mcpServers = options.mcpServers ?? this.defaultMcpServers;
     const result = await this.transport.request("session/new", {
       cwd,

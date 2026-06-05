@@ -95,3 +95,25 @@ describe("AcpOneShotClient", () => {
     await client.close();
   });
 });
+
+describe("AcpAgentClient session cwd", () => {
+  it("creates a non-existent session cwd before session/new (avoids agent -32603)", async () => {
+    const { mkdtempSync, existsSync } = await import("node:fs");
+    const os = await import("node:os");
+    const nodePath = await import("node:path");
+    const { AcpAgentClient } = await import("../src/acp-client");
+    const { FakeAcpAgentTransport } = await import("./fake-acp-agent");
+    const base = mkdtempSync(nodePath.join(os.tmpdir(), "acp-cwd-"));
+    const cwd = nodePath.join(base, "deep", "session-dir");
+    expect(existsSync(cwd)).toBe(false);
+    const client = new AcpAgentClient({
+      transport: new FakeAcpAgentTransport(),
+      strategy,
+      cwd,
+      now: () => 1
+    });
+    await client.startThread();
+    expect(existsSync(cwd)).toBe(true);
+    await client.close();
+  });
+});
