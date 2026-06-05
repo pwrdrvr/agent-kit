@@ -68,6 +68,39 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(completed).toMatchObject({ status: "completed" });
   });
 
+  it("serializes mcpServers to the ACP wire shape (env array + required args)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      now: () => 1,
+      mcpServers: [
+        {
+          name: "pwrsnap",
+          command: "/path/to/electron",
+          env: { TOKEN: "abc", SOCKET: "/tmp/x.sock" }
+        }
+      ]
+    });
+    await client.startThread();
+    const sessionNew = transport.requests.find((r) => r.method === "session/new");
+    const servers = (sessionNew?.params as { mcpServers: unknown[] }).mcpServers as Array<{
+      name: string;
+      command: string;
+      args: unknown;
+      env: unknown;
+    }>;
+    expect(servers[0]).toEqual({
+      name: "pwrsnap",
+      command: "/path/to/electron",
+      args: [], // required by ACP even when the host omits it
+      env: [
+        { name: "TOKEN", value: "abc" },
+        { name: "SOCKET", value: "/tmp/x.sock" }
+      ]
+    });
+  });
+
   it("folds startThread instructions into the FIRST turn prompt, once", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = makeClient(transport);

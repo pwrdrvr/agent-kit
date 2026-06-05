@@ -314,7 +314,16 @@ export class AcpAgentClient implements AgentBackend {
         message: cause instanceof Error ? cause.message : String(cause)
       });
     }
-    const mcpServers = options.mcpServers ?? this.defaultMcpServers;
+    // Serialize to the ACP `McpServer` wire shape: `args` is required and `env`
+    // is an array of `{ name, value }` — NOT the ergonomic `Record` we accept
+    // from hosts. Passing a record (or omitting args) makes strict agents (e.g.
+    // Gemini) fail `session/new` with an opaque "-32603 Internal error".
+    const mcpServers = (options.mcpServers ?? this.defaultMcpServers).map((server) => ({
+      name: server.name,
+      command: server.command,
+      args: server.args ?? [],
+      env: Object.entries(server.env ?? {}).map(([name, value]) => ({ name, value }))
+    }));
     const result = await this.transport.request("session/new", {
       cwd,
       mcpServers

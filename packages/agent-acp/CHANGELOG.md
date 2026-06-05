@@ -1,5 +1,17 @@
 # @pwrdrvr/agent-acp
 
+## 0.2.1
+
+### Patch Changes
+
+- Fix `session/new` MCP server serialization. `mcpServers` were sent with `env`
+  as a `Record` and `args` omitted, but ACP's `McpServer` wire shape requires
+  `args: string[]` and `env: Array<{ name, value }>`. Strict agents (Gemini)
+  rejected the record with an opaque "-32603 Internal error" on `session/new`,
+  breaking any MCP tool bridge. The ergonomic `AcpMcpServerConfig` (`env` as a
+  `Record`, optional `args`) is unchanged — translation happens at the protocol
+  boundary. Verified live: Gemini now spawns the host MCP server and calls a tool.
+
 ## 0.2.0
 
 ### Minor Changes
