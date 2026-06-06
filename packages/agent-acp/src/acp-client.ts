@@ -588,6 +588,42 @@ export class AcpAgentClient implements AgentBackend {
     }
   }
 
+  /** Release a thread the host has archived/closed.
+   *
+   *  ACP has NO protocol-level session delete/archive — sessions are
+   *  connection-scoped and the spec offers only `session/cancel` (interrupt).
+   *  So unlike the Codex backend (which sends `thread/archive`), there's no
+   *  remote call to make here. What we MUST do is drop the live session
+   *  LOCALLY: a long-lived pooled client (one process shared across surfaces,
+   *  warmed at startup) would otherwise accumulate a dead `AcpSessionState` for
+   *  every closed chat for the life of the app. Best-effort cancels an
+   *  in-flight turn first so the agent stops working on a thread the user
+   *  closed. Idempotent — no-ops if the session is already gone. A later
+   *  `reopenThread` re-establishes a fresh session under the same threadId, so
+   *  releasing here never blocks resume. */
+  async archiveThread(threadId: string): Promise<void> {
+    const session = this.sessions.get(threadId);
+    if (session === undefined) return;
+    if (session.turnId !== undefined) {
+      try {
+        if (this.transport.notify) {
+          await this.transport.notify("session/cancel", {
+            sessionId: session.protocolSessionId
+          });
+        } else {
+          await this.transport.request("session/cancel", {
+            sessionId: session.protocolSessionId
+          });
+        }
+      } catch {
+        // best-effort — the session is being released regardless.
+      }
+    }
+    this.sessions.delete(threadId);
+    this.threadIdByProtocolId.delete(session.protocolSessionId);
+    this.logger.debug("acp thread archived (session released locally)", { threadId });
+  }
+
   async setMode(threadId: string, modeId: string): Promise<void> {
     await this.setRuntimeOption(threadId, "mode", modeId, modeId);
   }

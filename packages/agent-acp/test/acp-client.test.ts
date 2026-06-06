@@ -269,6 +269,42 @@ describe("AcpAgentClient — lifecycle", () => {
     await client.close();
   });
 
+  it("archiveThread releases the live session locally (reopen re-establishes it)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread();
+    const newsBefore = transport.requests.filter((r) => r.method === "session/new").length;
+
+    await client.archiveThread(threadId);
+    // Session is gone, so reopen must create a FRESH one (proves it was released
+    // — reopen is a no-op while a session is still live).
+    await client.reopenThread({ threadId });
+    const newsAfter = transport.requests.filter((r) => r.method === "session/new").length;
+    expect(newsAfter).toBe(newsBefore + 1);
+    await client.close();
+  });
+
+  it("archiveThread cancels an in-flight turn before releasing the session", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    const { threadId } = await client.startThread();
+    // Start a turn but never finish it — the prompt stays pending.
+    await client.startTurn({ threadId, input: { text: "work…" } });
+
+    await client.archiveThread(threadId);
+    await flush();
+
+    expect(transport.notifications.some((n) => n.method === "session/cancel")).toBe(true);
+    await client.close();
+  });
+
+  it("archiveThread is idempotent — no-ops for an unknown/already-released thread", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = makeClient(transport);
+    await expect(client.archiveThread("acp:gemini:never-existed")).resolves.toBeUndefined();
+    await client.close();
+  });
+
   it("uses the agent's session GUID as the thread id when it is a UUID", async () => {
     const uuid = "836a1942-8a8e-4c8d-9744-497242519df5";
     const transport = new FakeAcpAgentTransport({ "session/new": { sessionId: uuid } });
