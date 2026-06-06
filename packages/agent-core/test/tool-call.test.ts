@@ -45,6 +45,16 @@ describe("preferSpecificLabel / isGenericLabel", () => {
     expect(preferSpecificLabel("Search library for cats", "search")).toBe("Search library for cats");
   });
 
+  it("treats the humanized tool_call_update fallback as generic (Grok titleless updates)", () => {
+    // A titleless ACP tool_call_update humanizes to "tool call update"; it must
+    // NOT clobber the real tool name from the initial tool_call.
+    expect(isGenericLabel("tool call update")).toBe(true);
+    expect(isGenericLabel("tool_call_update")).toBe(true);
+    expect(preferSpecificLabel("mcp__pwrsnap__list_layers", "tool call update")).toBe(
+      "mcp__pwrsnap__list_layers"
+    );
+  });
+
   it("takes a specific incoming label over anything", () => {
     expect(preferSpecificLabel("search", "Search library for cats")).toBe("Search library for cats");
     expect(preferSpecificLabel("tool", "Redact SSN")).toBe("Redact SSN");

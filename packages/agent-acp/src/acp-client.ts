@@ -739,6 +739,23 @@ export class AcpAgentClient implements AgentBackend {
       return;
     }
 
+    // Diagnostic: for tool notifications, log the RAW identity fields so a
+    // host can see exactly what an agent streamed — how many distinct
+    // toolCallIds, and whether each carries a title/name (Grok often sends
+    // titleless `tool_call_update`s, which is why a chip can read "tool call
+    // update" instead of the tool name). debug-level; off the hot path for
+    // non-tool updates.
+    const updateKind = readString(update, "sessionUpdate");
+    if (updateKind === "tool_call" || updateKind === "tool_call_update") {
+      this.logger.debug("acp tool notification", {
+        kind: updateKind,
+        toolCallId: readString(update, "toolCallId") ?? readString(update, "tool_call_id"),
+        title: readString(update, "title"),
+        name: readString(update, "name"),
+        status: readString(update, "status")
+      });
+    }
+
     const ctx: AcpApplyContext = {
       threadId: session.threadId,
       turnId: session.turnId ?? `turn:${session.threadId}:detached`

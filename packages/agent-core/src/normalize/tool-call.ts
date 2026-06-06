@@ -33,6 +33,12 @@ function tokenize(name: string): Set<string> {
 const GENERIC_LABELS = new Set([
   "tool",
   "tool call",
+  // The humanized ACP `tool_call_update` sessionUpdate type — what an adapter
+  // falls back to when an update notification carries no title/name (e.g. Grok).
+  // Without these it counted as "specific" and clobbered the real tool name
+  // carried by the initial tool_call.
+  "tool call update",
+  "tool_call_update",
   "command",
   "execute",
   "exec",
