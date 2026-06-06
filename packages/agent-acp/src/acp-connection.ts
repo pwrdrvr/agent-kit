@@ -61,6 +61,79 @@ export type AcpConnectionOptions = {
   createConnection?: (client: Client) => AcpAgentConnectionHandle;
 };
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Coerce a tool-call notification's `rawInput` / `rawOutput` so it survives the
+ *  library's schema, which types BOTH as `z.record(z.unknown())` (a plain
+ *  object). Real agents don't honor that: Kimi sends `rawOutput` as a JSON
+ *  STRING (a tool's text result) or an ARRAY, which fails validation and makes
+ *  the library reject the WHOLE `session/update` (`-32602 Invalid params`,
+ *  logged as "Error handling notification") — so the tool's status update is
+ *  silently dropped. Our old hand-rolled connection never validated, so it
+ *  tolerated this. We wrap a non-object value as `{ value: <orig> }` (data
+ *  preserved, schema satisfied) and drop an explicit `null` (the field is
+ *  `.optional()`, not nullable). Plain-object values pass through untouched, so
+ *  the normal `rawInput` args object is unchanged. */
+export function sanitizeAcpNotificationLine(line: string): string {
+  if (line.trim().length === 0) return line;
+  let message: unknown;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return line; // not JSON (or a partial line) — never our concern.
+  }
+  if (!isPlainObject(message) || message.method !== "session/update") return line;
+  const params = message.params;
+  if (!isPlainObject(params)) return line;
+  const update = params.update;
+  if (!isPlainObject(update)) return line;
+  let changed = false;
+  for (const key of ["rawInput", "rawOutput"] as const) {
+    if (!(key in update)) continue;
+    const value = update[key];
+    if (value === undefined || isPlainObject(value)) continue;
+    if (value === null) {
+      delete update[key];
+    } else {
+      update[key] = { value };
+    }
+    changed = true;
+  }
+  return changed ? JSON.stringify(message) : line;
+}
+
+/** Wrap an agent's stdout so every inbound ndjson line is sanitized
+ *  (`sanitizeAcpNotificationLine`) before the library frames + validates it. */
+function sanitizeInboundStream(
+  source: ReadableStream<Uint8Array>
+): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  return source.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let nl = buffer.indexOf("\n");
+        while (nl !== -1) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          controller.enqueue(encoder.encode(sanitizeAcpNotificationLine(line) + "\n"));
+          nl = buffer.indexOf("\n");
+        }
+      },
+      flush(controller) {
+        if (buffer.length > 0) {
+          controller.enqueue(encoder.encode(sanitizeAcpNotificationLine(buffer)));
+          buffer = "";
+        }
+      }
+    })
+  );
+}
+
 export class AcpConnection implements AcpJsonRpcTransport {
   private readonly logger: Logger;
   private connection: AcpAgentConnection | undefined;
@@ -149,7 +222,13 @@ export class AcpConnection implements AcpJsonRpcTransport {
       // ndJsonStream(writeToAgentStdin, readFromAgentStdout) — arg order: first is
       // the WritableStream we send to, second is the ReadableStream we read from.
       const toAgentStdin = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
-      const fromAgentStdout = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+      // Sanitize inbound ndjson BEFORE the library frames + schema-validates it,
+      // so a non-spec `rawInput`/`rawOutput` (e.g. Kimi's string/array tool
+      // output) doesn't get the whole notification rejected. See
+      // `sanitizeAcpNotificationLine`.
+      const fromAgentStdout = sanitizeInboundStream(
+        Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
+      );
       const stream = ndJsonStream(toAgentStdin, fromAgentStdout);
       const connection = new ClientSideConnection(
         (_agent: Agent) => client,

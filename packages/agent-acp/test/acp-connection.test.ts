@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Client } from "@zed-industries/agent-client-protocol";
-import { AcpConnection, type AcpAgentConnection } from "../src/acp-connection";
+import { sessionNotificationSchema, type Client } from "@zed-industries/agent-client-protocol";
+import {
+  AcpConnection,
+  sanitizeAcpNotificationLine,
+  type AcpAgentConnection
+} from "../src/acp-connection";
 
 /** A stub agent connection capturing calls + returning canned results. */
 function stubConnection(overrides: Partial<AcpAgentConnection> = {}): AcpAgentConnection {
@@ -144,5 +148,87 @@ describe("AcpConnection — bridges agent→client traffic to onNotification/onR
     await expect(client().requestPermission({ sessionId: "sess-1" } as never)).rejects.toThrow(
       /request handler unavailable/
     );
+  });
+});
+
+describe("sanitizeAcpNotificationLine", () => {
+  // Regression: 0.9.0 adopted the official ACP library, which validates inbound
+  // notifications. Its schema types tool_call(_update).rawInput/rawOutput as
+  // z.record (a plain object), but Kimi sends rawOutput as a JSON STRING or
+  // ARRAY — failing validation and dropping the whole session/update.
+  const line = (update: Record<string, unknown>): string =>
+    JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "session_x", update }
+    });
+  const paramsOf = (raw: string): unknown => (JSON.parse(raw) as { params: unknown }).params;
+
+  it("a Kimi-style string rawOutput FAILS the real library schema before sanitizing", () => {
+    const params = paramsOf(
+      line({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "0:tool_x",
+        status: "completed",
+        rawOutput: '[{"id":"layer1","name":"AI arrow"}]'
+      })
+    );
+    expect(sessionNotificationSchema.safeParse(params).success).toBe(false);
+  });
+
+  it("wraps a non-object rawOutput so it PASSES the real library schema", () => {
+    for (const rawOutput of ['[{"id":"l1"}]', "a string", 42, true]) {
+      const sanitized = sanitizeAcpNotificationLine(
+        line({ sessionUpdate: "tool_call_update", toolCallId: "t", rawOutput })
+      );
+      expect(
+        sessionNotificationSchema.safeParse(paramsOf(sanitized)).success,
+        `rawOutput=${JSON.stringify(rawOutput)}`
+      ).toBe(true);
+      const out = (paramsOf(sanitized) as { update: { rawOutput: unknown } }).update.rawOutput;
+      expect(out).toEqual({ value: rawOutput }); // data preserved
+    }
+  });
+
+  it("wraps an ARRAY rawOutput (render_composite shape)", () => {
+    const sanitized = sanitizeAcpNotificationLine(
+      line({ sessionUpdate: "tool_call_update", toolCallId: "t", rawOutput: [{ a: 1 }, { b: 2 }] })
+    );
+    expect(sessionNotificationSchema.safeParse(paramsOf(sanitized)).success).toBe(true);
+  });
+
+  it("also fixes rawInput and the initial tool_call notification", () => {
+    const sanitized = sanitizeAcpNotificationLine(
+      line({ sessionUpdate: "tool_call", toolCallId: "t", title: "Call x", rawInput: "not-an-object" })
+    );
+    expect(sessionNotificationSchema.safeParse(paramsOf(sanitized)).success).toBe(true);
+  });
+
+  it("leaves a valid OBJECT rawInput untouched (normal tool args)", () => {
+    const sanitized = sanitizeAcpNotificationLine(
+      line({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t",
+        rawInput: { capture_id: "r6qk", color: "#3b82f6" }
+      })
+    );
+    const out = (paramsOf(sanitized) as { update: { rawInput: unknown } }).update.rawInput;
+    expect(out).toEqual({ capture_id: "r6qk", color: "#3b82f6" });
+  });
+
+  it("drops an explicit null rawOutput (schema is optional, not nullable)", () => {
+    const sanitized = sanitizeAcpNotificationLine(
+      line({ sessionUpdate: "tool_call_update", toolCallId: "t", rawOutput: null })
+    );
+    const update = (paramsOf(sanitized) as { update: Record<string, unknown> }).update;
+    expect("rawOutput" in update).toBe(false);
+    expect(sessionNotificationSchema.safeParse(paramsOf(sanitized)).success).toBe(true);
+  });
+
+  it("passes through non-session/update lines and malformed JSON unchanged", () => {
+    const other = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } });
+    expect(sanitizeAcpNotificationLine(other)).toBe(other);
+    expect(sanitizeAcpNotificationLine("not json at all")).toBe("not json at all");
+    expect(sanitizeAcpNotificationLine("")).toBe("");
   });
 });
