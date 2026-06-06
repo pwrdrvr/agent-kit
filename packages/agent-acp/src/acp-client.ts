@@ -51,7 +51,7 @@ import {
   type AcpRuntimeCapabilities,
   type AcpSessionRuntimeState
 } from "./normalizer/runtime-capabilities";
-import type { AcpJsonRpcTransport } from "./acp-stdio-transport";
+import type { AcpJsonRpcTransport } from "./acp-transport";
 
 const ACP_PROTOCOL_VERSION = 1;
 const ACP_PROMPT_REQUEST_TIMEOUT_MS = 60 * 60_000;

@@ -2,7 +2,7 @@
 // testing/fake-acp-agent.ts to the agent-kit AcpJsonRpcTransport surface.
 
 import type { JsonRpcId } from "@pwrdrvr/agent-transport";
-import type { AcpJsonRpcTransport } from "../src/acp-stdio-transport";
+import type { AcpJsonRpcTransport } from "../src/acp-transport";
 
 export class FakeAcpAgentTransport implements AcpJsonRpcTransport {
   readonly requests: Array<{

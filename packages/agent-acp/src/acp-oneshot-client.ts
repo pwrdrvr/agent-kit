@@ -28,7 +28,7 @@ import {
   type NormalizedTokenUsage
 } from "@pwrdrvr/agent-core";
 import { AcpAgentClient } from "./acp-client";
-import type { AcpJsonRpcTransport } from "./acp-stdio-transport";
+import type { AcpJsonRpcTransport } from "./acp-transport";
 import type { AcpAgentStrategy } from "./strategies/strategy-types";
 import type { AcpRuntimeModel } from "./normalizer/runtime-capabilities";
 

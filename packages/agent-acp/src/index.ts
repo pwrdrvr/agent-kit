@@ -6,10 +6,12 @@
 // `AgentBackend`, so it unifies with `CodexThreadClient` behind one interface.
 
 export {
-  AcpStdioJsonRpcTransport,
-  type AcpJsonRpcTransport,
-  type AcpStdioJsonRpcTransportOptions
-} from "./acp-stdio-transport";
+  AcpConnection,
+  type AcpConnectionOptions,
+  type AcpAgentConnection,
+  type AcpAgentConnectionHandle
+} from "./acp-connection";
+export type { AcpJsonRpcTransport } from "./acp-transport";
 
 export {
   AcpAgentClient,

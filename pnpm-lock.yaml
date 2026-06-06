@@ -54,6 +54,9 @@ importers:
       '@pwrdrvr/agent-transport':
         specifier: workspace:^
         version: link:../agent-transport
+      '@zed-industries/agent-client-protocol':
+        specifier: 0.4.5
+        version: 0.4.5
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -804,6 +807,10 @@ packages:
 
   '@vitest/utils@3.2.4':
     resolution: {integrity: sha512-fB2V0JFrQSMsCo9HiSq3Ezpdv4iYaXRG1Sx8edX3MwxfyNn83mKiGzOcH+Fkxt4MHxr3y42fQi1oeAInqgX2QA==}
+
+  '@zed-industries/agent-client-protocol@0.4.5':
+    resolution: {integrity: sha512-OwHKfu5AiKul/GSJilHg36+kOSV9eOl2eYnjR6tenAQDdraSnt22WFk0SDFTeuAANz1Gxkv+DTf7Hq32rvX7FQ==}
+    deprecated: This package has been renamed to @agentclientprotocol/sdk. Please migrate to continue receiving updates.
 
   acorn-jsx-walk@2.0.0:
     resolution: {integrity: sha512-uuo6iJj4D4ygkdzd6jPtcxs8vZgDX9YFIkqczGImoypX2fQ4dVImmu3UzA4ynixCIMTrEOWW+95M2HuBaCEOVA==}
@@ -1840,6 +1847,9 @@ packages:
   xmlchars@2.2.0:
     resolution: {integrity: sha512-JZnDKK8B0RCDw84FNdDAIpZK+JuJw+s7Lz8nksI7SIuU3UXJJslUthsi+uWBUYOwPFwW7W7PRLRfUKpxjtjFCw==}
 
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
   zod@4.4.3:
     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
@@ -2397,6 +2407,10 @@ snapshots:
       '@vitest/pretty-format': 3.2.4
       loupe: 3.2.1
       tinyrainbow: 2.0.0
+
+  '@zed-industries/agent-client-protocol@0.4.5':
+    dependencies:
+      zod: 3.25.76
 
   acorn-jsx-walk@2.0.0: {}
 
@@ -3396,5 +3410,7 @@ snapshots:
   xml-name-validator@5.0.0: {}
 
   xmlchars@2.2.0: {}
+
+  zod@3.25.76: {}
 
   zod@4.4.3: {}
