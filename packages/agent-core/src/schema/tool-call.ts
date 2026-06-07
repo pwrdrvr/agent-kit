@@ -37,6 +37,14 @@ export type NormalizedCommandDetail = {
   durationMs?: number;
 };
 
+/** A file (and optional line) a tool read/wrote/touched. From the ACP
+ *  `locations` field — preserved so a consumer can show which file a
+ *  `read`/`write`/file tool acted on. */
+export type NormalizedToolLocation = {
+  path: string;
+  line?: number;
+};
+
 export type NormalizedToolCall = {
   /** Stable id correlating a tool_call with its later tool_call_update(s). */
   id: string;
@@ -52,6 +60,9 @@ export type NormalizedToolCall = {
   result?: unknown;
   command?: NormalizedCommandDetail;
   fileDiff?: NormalizedFileDiff;
+  /** Files (+ optional line) the tool read/wrote/touched (ACP `locations`).
+   *  Preserved for `read`/`write`/file tools so a consumer can show the path. */
+  locations?: NormalizedToolLocation[];
 };
 
 /** A partial tool-call delta. `id` is required so it can correlate to a prior tool_call. */

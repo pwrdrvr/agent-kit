@@ -1,5 +1,28 @@
 # @pwrdrvr/agent-acp
 
+## 0.11.0
+
+### Minor Changes
+
+- Fix #1: preserve tool-call file locations and stop fabricating a command detail
+  for read/file tools.
+
+  - agent-core: `NormalizedToolCall` gains `locations?: NormalizedToolLocation[]`
+    (`{ path, line? }`), and `mergeToolCall` carries it (a later non-empty update
+    replaces; an omitting update keeps the prior list).
+  - agent-acp: the ACP normalizer now populates `locations` from the ACP
+    `locations` field (all entries, not just the first), and builds a `command`
+    detail ONLY for genuine command tools (a command string or exit code present).
+    A `read`'s file content stays on `result` and its path rides `locations`,
+    instead of being folded into a fake `command.displayCommand` (the data loss
+    PwrAgent's lossless-replay parity harness flagged).
+
+### Patch Changes
+
+- Updated dependencies
+  - @pwrdrvr/agent-core@0.2.0
+  - @pwrdrvr/agent-transport@0.1.6
+
 ## 0.10.3
 
 ### Patch Changes

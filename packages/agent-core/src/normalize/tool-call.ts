@@ -109,6 +109,11 @@ export function mergeToolCall(
   if (update.fileDiff !== undefined) {
     merged.fileDiff = { ...prev.fileDiff, ...update.fileDiff };
   }
+  // ACP sends the complete location list per update, so a later non-empty
+  // `locations` replaces (not merges into) the prior one.
+  if (update.locations !== undefined) {
+    merged.locations = update.locations;
+  }
 
   return merged;
 }

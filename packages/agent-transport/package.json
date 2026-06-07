@@ -1,6 +1,6 @@
 {
   "name": "@pwrdrvr/agent-transport",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Generic JSON-RPC 2.0 core + line-delimited stdio transport for driving local agents (Codex App Server, ACP).",
   "license": "MIT",
   "author": "PwrDrvr LLC",

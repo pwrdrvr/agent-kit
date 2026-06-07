@@ -179,7 +179,7 @@ describe("AcpSessionNormalizer — tool calls", () => {
     expect(events[0]).toMatchObject({ toolCall: { kind: "other" } });
   });
 
-  it("extracts nested tool update content as command output", () => {
+  it("extracts nested tool update content as the read RESULT, not a fake command (issue #1)", () => {
     const events = applyAll(gemini(), [
       { sessionUpdate: "tool_call", toolCallId: "r1", kind: "read", title: "README.md", status: "in_progress" },
       {
@@ -191,8 +191,52 @@ describe("AcpSessionNormalizer — tool calls", () => {
         content: [{ type: "content", content: { type: "text", text: "Read lines 1-80" } }]
       }
     ]);
-    expect(events[1]).toMatchObject({
-      toolCall: { result: "Read lines 1-80", command: { output: "Read lines 1-80" } }
+    expect(events[1]).toMatchObject({ toolCall: { kind: "read", result: "Read lines 1-80" } });
+    // A read's content is its result — it must NOT be fabricated into a command.
+    const tc = (events[1] as { toolCall: { command?: unknown } }).toolCall;
+    expect(tc.command).toBeUndefined();
+  });
+
+  it("preserves a read tool's file path via locations, with no command (issue #1)", () => {
+    const events = applyAll(gemini(), [
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "read-1",
+        kind: "read",
+        title: "README.md",
+        status: "completed",
+        locations: [{ path: "/repo/README.md", line: 12 }]
+      }
+    ]);
+    expect(events[0]).toMatchObject({
+      toolCall: {
+        kind: "read",
+        label: "README.md",
+        status: "completed",
+        locations: [{ path: "/repo/README.md", line: 12 }]
+      }
+    });
+    const tc = (events[0] as { toolCall: { command?: unknown } }).toolCall;
+    expect(tc.command).toBeUndefined();
+  });
+
+  it("a genuine command tool still gets command detail (output + exitCode)", () => {
+    const events = applyAll(gemini(), [
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "c1",
+        kind: "execute",
+        title: "ls -la",
+        command: "ls -la",
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: "file1\nfile2" } }]
+      }
+    ]);
+    expect(events[0]).toMatchObject({
+      toolCall: {
+        kind: "command",
+        command: { displayCommand: "ls -la", rawCommand: "ls -la", output: "file1\nfile2" }
+      }
     });
   });
 });

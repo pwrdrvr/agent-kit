@@ -8,6 +8,7 @@ import {
   type NormalizedCommandDetail,
   type NormalizedToolCall,
   type NormalizedToolKind,
+  type NormalizedToolLocation,
   type NormalizedToolStatus
 } from "@pwrdrvr/agent-core";
 import {
@@ -126,12 +127,21 @@ export function toolCallFromUpdate(
     call.result = output;
   }
 
-  // An explicit display target only when the update actually names one. A
-  // kind-derived label ("execute") is NOT used here, so a later output-only
-  // update never clobbers an earlier specific displayCommand on merge (the
-  // normalizer reconciles displayCommand via preferSpecificLabel).
+  // Preserve the file(s) a read/write/file tool touched (ACP `locations`) so a
+  // consumer can show the path. Lossless: ALL locations, not just the first.
+  const locations = readToolLocations(update);
+  if (locations.length > 0) {
+    call.locations = locations;
+  }
+
+  // Build a command detail ONLY for genuine command tools — i.e. when the update
+  // carries a command string or an exit code. A `read` returning file content
+  // has `output` but no command/exitCode, so its output stays on `result` (not
+  // folded into a fake command) and its path rides `locations`. An explicit
+  // display target is used only when the update names one, so a later output-
+  // only update never clobbers an earlier specific displayCommand on merge.
   const explicitDisplay = command ?? readString(update, "title");
-  if (command || output !== undefined || exitCode !== undefined) {
+  if (command !== undefined || exitCode !== undefined) {
     const detail: NormalizedCommandDetail = {
       displayCommand: explicitDisplay ?? label
     };
@@ -141,15 +151,25 @@ export function toolCallFromUpdate(
     call.command = detail;
   }
 
-  if ((toolKind === "write" || toolKind === "read") && path) {
-    // Surface the path through the label-adjacent command detail so consumers
-    // that render a file target can find it without an ACP-specific field.
-    if (!call.command) {
-      call.command = { displayCommand: label };
-    }
-  }
-
   return call;
+}
+
+/** Read all ACP tool-call `locations` ({ path, line? }), dropping entries with
+ *  no path. The ACP field is `locations: [{ path, line? }]`. */
+function readToolLocations(update: Record<string, unknown>): NormalizedToolLocation[] {
+  const raw = update.locations;
+  if (!Array.isArray(raw)) return [];
+  const out: NormalizedToolLocation[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const path = record ? readString(record, "path") : undefined;
+    if (path === undefined) continue;
+    const location: NormalizedToolLocation = { path };
+    const line = record ? readNumber(record, "line") : undefined;
+    if (line !== undefined) location.line = line;
+    out.push(location);
+  }
+  return out;
 }
 
 function readToolArgs(update: Record<string, unknown>): unknown {

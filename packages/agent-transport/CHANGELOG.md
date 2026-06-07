@@ -1,5 +1,12 @@
 # @pwrdrvr/agent-transport
 
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies
+  - @pwrdrvr/agent-core@0.2.0
+
 ## 0.1.5
 
 ### Patch Changes

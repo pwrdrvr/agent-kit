@@ -1,5 +1,14 @@
 # @pwrdrvr/agent-client
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @pwrdrvr/agent-core@0.2.0
+  - @pwrdrvr/agent-transport@0.1.6
+  - @pwrdrvr/codex-discovery@0.1.3
+
 ## 0.6.0
 
 ### Minor Changes

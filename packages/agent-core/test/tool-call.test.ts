@@ -121,4 +121,27 @@ describe("mergeToolCall", () => {
       exitCode: 0
     });
   });
+
+  it("replaces tool-call locations from a later update (ACP sends the full list)", () => {
+    const withLoc: NormalizedToolCall = {
+      ...base,
+      kind: "read",
+      locations: [{ path: "/repo/a.ts" }]
+    };
+    const merged = mergeToolCall(withLoc, {
+      id: "call_1",
+      locations: [{ path: "/repo/b.ts", line: 5 }]
+    });
+    expect(merged.locations).toEqual([{ path: "/repo/b.ts", line: 5 }]);
+  });
+
+  it("keeps prior locations when an update omits them", () => {
+    const withLoc: NormalizedToolCall = {
+      ...base,
+      kind: "read",
+      locations: [{ path: "/repo/a.ts" }]
+    };
+    const merged = mergeToolCall(withLoc, { id: "call_1", status: "completed" });
+    expect(merged.locations).toEqual([{ path: "/repo/a.ts" }]);
+  });
 });
