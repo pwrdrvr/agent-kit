@@ -31,6 +31,32 @@ describe("normalizeAcpRuntimeCapabilities — merge over initialize", () => {
     expect(caps?.modes?.currentModeId).toBe("yolo");
   });
 
+  it("flags the agent's current model as isDefault (and only that one)", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "initialize",
+      value: {
+        models: {
+          availableModels: [{ id: "fast" }, { id: "smart" }, { id: "turbo" }],
+          currentModelId: "smart"
+        }
+      }
+    });
+    const byId = new Map(caps?.models?.availableModels.map((m) => [m.id, m]));
+    expect(byId.get("smart")?.isDefault).toBe(true);
+    expect(byId.get("fast")?.isDefault).toBeUndefined();
+    expect(byId.get("turbo")?.isDefault).toBeUndefined();
+  });
+
+  it("flags no model when the agent advertises models but no currentModelId", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "initialize",
+      value: { models: { availableModels: [{ id: "fast" }, { id: "smart" }] } }
+    });
+    expect(caps?.models?.availableModels.every((m) => m.isDefault === undefined)).toBe(true);
+  });
+
   it("a set_model mid-session merges over initialize without dropping prior modes", () => {
     const initialize = normalizeAcpRuntimeCapabilities({
       now: 1,

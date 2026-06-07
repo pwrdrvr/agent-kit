@@ -36,6 +36,11 @@ export type AcpRuntimeModel = {
   id: string;
   label?: string;
   description?: string;
+  /** True when this is the model the agent reports as current/default
+   *  (`currentModelId`). At most one model in a list is flagged; absent when the
+   *  agent advertises models but no current id. A host can pre-select this and
+   *  render it as the "(default)" option. */
+  isDefault?: boolean;
 };
 
 export type AcpRuntimeModes = {
@@ -356,7 +361,13 @@ function readModels(value: unknown): AcpRuntimeModels | undefined {
   const result: AcpRuntimeModels = { availableModels: models };
   const currentModelId =
     readString(record, "currentModelId") ?? readString(record, "modelId");
-  if (currentModelId !== undefined) result.currentModelId = currentModelId;
+  if (currentModelId !== undefined) {
+    result.currentModelId = currentModelId;
+    // Flag the agent's protocol-confirmed default so a host can pre-select it
+    // and label it "(default)" without re-deriving from currentModelId.
+    const defaultModel = models.find((model) => model.id === currentModelId);
+    if (defaultModel) defaultModel.isDefault = true;
+  }
   return result;
 }
 

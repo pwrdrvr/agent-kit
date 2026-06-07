@@ -1,5 +1,16 @@
 # @pwrdrvr/agent-acp
 
+## 0.10.0
+
+### Minor Changes
+
+- Surface the agent's default model. `AcpRuntimeModel` gains an optional
+  `isDefault` flag, set on the model whose id matches the agent's protocol-reported
+  `currentModelId`. It flows everywhere runtime model capabilities are read,
+  including `AcpOneShotClient.listModels()` — so a host can pre-select the true
+  agent default and label it "(default)" instead of guessing first-in-list.
+  Additive/non-breaking; absent when an agent advertises models but no current id.
+
 ## 0.9.3
 
 ### Patch Changes
