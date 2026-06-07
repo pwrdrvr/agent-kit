@@ -1,5 +1,17 @@
 # @pwrdrvr/agent-acp
 
+## 0.10.1
+
+### Patch Changes
+
+- Recognize Grok/xAI token usage. Grok reports counts as camelCase fields directly
+  on the `session/prompt` response `_meta`
+  (`_meta.{totalTokens,inputTokens,outputTokens,cachedReadTokens,reasoningTokens}`),
+  not under `_meta.usage`/`_meta.quota`. `readAcpPromptUsage` now accepts camelCase
+  aliases in the generic usage parser and tries `_meta` itself as a usage source,
+  so Grok runs report token usage (and downstream list-price) instead of "usage
+  unavailable".
+
 ## 0.10.0
 
 ### Minor Changes

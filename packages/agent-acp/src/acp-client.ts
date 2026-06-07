@@ -1215,27 +1215,36 @@ function usageFromGeminiQuota(tokenCount: Record<string, unknown>): NormalizedTo
 function usageFromGenericUsage(usage: Record<string, unknown>): NormalizedTokenUsage | undefined {
   const promptDetails = asRecord(usage.prompt_tokens_details);
   const completionDetails = asRecord(usage.completion_tokens_details);
+  // Accepts snake_case (OpenAI/Anthropic) AND camelCase (Grok/xAI, which reports
+  // `inputTokens`/`outputTokens`/`cachedReadTokens`/`reasoningTokens`/`totalTokens`).
   return assembleUsage({
-    input: usageNum(usage.prompt_tokens ?? usage.input_tokens),
-    output: usageNum(usage.completion_tokens ?? usage.output_tokens),
+    input: usageNum(usage.prompt_tokens ?? usage.input_tokens ?? usage.inputTokens),
+    output: usageNum(usage.completion_tokens ?? usage.output_tokens ?? usage.outputTokens),
     cached: usageNum(
       promptDetails?.cached_tokens ??
         usage.cache_read_input_tokens ??
         usage.cached_tokens ??
-        usage.cached_input_tokens
+        usage.cached_input_tokens ??
+        usage.cachedReadTokens ??
+        usage.cachedTokens
     ),
     reasoning: usageNum(
-      completionDetails?.reasoning_tokens ?? usage.reasoning_tokens ?? usage.thoughts_tokens
+      completionDetails?.reasoning_tokens ??
+        usage.reasoning_tokens ??
+        usage.thoughts_tokens ??
+        usage.reasoningTokens
     ),
-    total: usageNum(usage.total_tokens)
+    total: usageNum(usage.total_tokens ?? usage.totalTokens)
   });
 }
 
 /** Read token usage from a `session/prompt` response. Agents disagree on shape:
  *  - Gemini: `_meta.quota.token_count.{input_tokens,output_tokens,…}`
- *  - OpenAI dialect (Grok/xAI, Qwen): `usage.{prompt_tokens,completion_tokens,…}`
- *    — at the result root OR under `_meta`.
+ *  - OpenAI dialect (Qwen): `usage.{prompt_tokens,completion_tokens,…}` — at the
+ *    result root OR under `_meta`.
  *  - Anthropic dialect: `usage.{input_tokens,output_tokens,cache_read_input_tokens}`.
+ *  - Grok/xAI: camelCase counts DIRECTLY on `_meta`
+ *    (`_meta.{totalTokens,inputTokens,outputTokens,cachedReadTokens,reasoningTokens}`).
  *  Returns undefined when nothing recognizable is present. */
 function readAcpPromptUsage(result: unknown): NormalizedTokenUsage | undefined {
   const root = asRecord(result);
@@ -1252,6 +1261,14 @@ function readAcpPromptUsage(result: unknown): NormalizedTokenUsage | undefined {
   if (usageObj) {
     const fromGeneric = usageFromGenericUsage(usageObj);
     if (fromGeneric) return fromGeneric;
+  }
+
+  // Grok/xAI: the counts sit directly on `_meta` (no nested `usage`/`quota`).
+  // usageFromGenericUsage reads only token keys and returns undefined otherwise,
+  // so passing the whole `_meta` is safe.
+  if (meta) {
+    const fromMeta = usageFromGenericUsage(meta);
+    if (fromMeta) return fromMeta;
   }
 
   return undefined;

@@ -145,6 +145,33 @@ describe("AcpOneShotClient", () => {
     await client.close();
   });
 
+  it("reports Grok/xAI usage from camelCase counts directly on _meta", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({
+      stopReason: "end_turn",
+      _meta: {
+        totalTokens: 8200,
+        inputTokens: 8000,
+        outputTokens: 200,
+        cachedReadTokens: 1024,
+        reasoningTokens: 64
+      }
+    });
+    const response = await pending;
+    expect(response.tokenUsage).toEqual({
+      totalTokens: 8200,
+      inputTokens: 8000,
+      outputTokens: 200,
+      cachedInputTokens: 1024,
+      reasoningOutputTokens: 64
+    });
+    await client.close();
+  });
+
   it("returns null usage when the response carries no recognizable shape", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
