@@ -1,5 +1,18 @@
 # @pwrdrvr/agent-acp
 
+## 0.9.3
+
+### Patch Changes
+
+- Broaden ACP token-usage parsing beyond Gemini's quota shape. `readAcpPromptUsage`
+  now also recognizes the OpenAI dialect (`usage.{prompt_tokens,completion_tokens,
+prompt_tokens_details.cached_tokens,completion_tokens_details.reasoning_tokens}`,
+  used by Grok/xAI and Qwen) and the Anthropic dialect (`usage.{input_tokens,
+output_tokens,cache_read_input_tokens}`), at either the result root or under
+  `_meta`. When no recognized shape is present, a debug log records the key paths
+  (never values) so a new agent's reporting format is diagnosable instead of
+  silently surfacing "usage unavailable".
+
 ## 0.9.2
 
 ### Patch Changes

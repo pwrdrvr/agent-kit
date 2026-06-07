@@ -98,6 +98,65 @@ describe("AcpOneShotClient", () => {
     await client.close();
   });
 
+  it("reports OpenAI-dialect usage from the result root (Grok/xAI, Qwen)", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({
+      stopReason: "end_turn",
+      usage: {
+        prompt_tokens: 300,
+        completion_tokens: 40,
+        total_tokens: 340,
+        prompt_tokens_details: { cached_tokens: 128 },
+        completion_tokens_details: { reasoning_tokens: 12 }
+      }
+    });
+    const response = await pending;
+    expect(response.tokenUsage).toEqual({
+      totalTokens: 340,
+      inputTokens: 300,
+      outputTokens: 40,
+      cachedInputTokens: 128,
+      reasoningOutputTokens: 12
+    });
+    await client.close();
+  });
+
+  it("reports Anthropic-dialect usage nested under _meta", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({
+      stopReason: "end_turn",
+      _meta: { usage: { input_tokens: 50, output_tokens: 9, cache_read_input_tokens: 16 } }
+    });
+    const response = await pending;
+    expect(response.tokenUsage).toEqual({
+      totalTokens: 59,
+      inputTokens: 50,
+      outputTokens: 9,
+      cachedInputTokens: 16
+    });
+    await client.close();
+  });
+
+  it("returns null usage when the response carries no recognizable shape", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({ stopReason: "end_turn" });
+    const response = await pending;
+    expect(response.tokenUsage).toBeNull();
+    await client.close();
+  });
+
   it("listModels resolves to an array (empty when the agent advertises none)", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });

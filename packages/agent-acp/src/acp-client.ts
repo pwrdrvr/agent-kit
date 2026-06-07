@@ -538,6 +538,15 @@ export class AcpAgentClient implements AgentBackend {
         const usage = readAcpPromptUsage(promptResult);
         if (usage) {
           this.emit({ kind: "token_usage", threadId: session.threadId, turnId, usage });
+        } else {
+          // No recognized usage shape — log WHERE usage-like keys live (paths
+          // only, never values) so a new agent's reporting format is
+          // diagnosable instead of silently surfacing "usage unavailable".
+          this.logger.debug("acp prompt response carried no recognized token usage", {
+            threadId: session.threadId,
+            turnId,
+            shape: describeUsageShape(promptResult)
+          });
         }
         // Flush any in-flight assistant bubble into a terminal agent_message.
         for (const event of session.normalizer.finalizeAssistantMessage({
@@ -1166,25 +1175,104 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** Read token usage from a `session/prompt` response. Agents report it in
- *  `_meta.quota.token_count`, e.g. Gemini:
- *  `{ _meta: { quota: { token_count: { input_tokens, output_tokens } } } }`.
- *  Returns undefined when no usage is present. */
-function readAcpPromptUsage(result: unknown): NormalizedTokenUsage | undefined {
-  const meta = asRecord(asRecord(result)?._meta);
-  const tokenCount = asRecord(asRecord(meta?.quota)?.token_count);
-  if (!tokenCount) return undefined;
-  const num = (value: unknown): number | undefined =>
-    typeof value === "number" && Number.isFinite(value) ? value : undefined;
-  const input = num(tokenCount.input_tokens);
-  const output = num(tokenCount.output_tokens);
-  const cached = num(tokenCount.cached_input_tokens ?? tokenCount.cached_tokens);
-  const reasoning = num(tokenCount.thoughts_tokens ?? tokenCount.reasoning_tokens);
-  if (input === undefined && output === undefined) return undefined;
-  const usage: NormalizedTokenUsage = { totalTokens: (input ?? 0) + (output ?? 0) };
+const usageNum = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) ? value : undefined;
+
+/** Assemble a NormalizedTokenUsage from already-extracted counts, or undefined
+ *  when neither input nor output is present. */
+function assembleUsage(parts: {
+  input?: number | undefined;
+  output?: number | undefined;
+  cached?: number | undefined;
+  reasoning?: number | undefined;
+  total?: number | undefined;
+}): NormalizedTokenUsage | undefined {
+  const { input, output, cached, reasoning, total } = parts;
+  if (input === undefined && output === undefined && total === undefined) return undefined;
+  const usage: NormalizedTokenUsage = {
+    totalTokens: total ?? (input ?? 0) + (output ?? 0)
+  };
   if (input !== undefined) usage.inputTokens = input;
   if (output !== undefined) usage.outputTokens = output;
   if (cached !== undefined) usage.cachedInputTokens = cached;
   if (reasoning !== undefined) usage.reasoningOutputTokens = reasoning;
   return usage;
+}
+
+/** Gemini quota shape: `_meta.quota.token_count.{input_tokens,output_tokens,…}`. */
+function usageFromGeminiQuota(tokenCount: Record<string, unknown>): NormalizedTokenUsage | undefined {
+  return assembleUsage({
+    input: usageNum(tokenCount.input_tokens),
+    output: usageNum(tokenCount.output_tokens),
+    cached: usageNum(tokenCount.cached_input_tokens ?? tokenCount.cached_tokens),
+    reasoning: usageNum(tokenCount.thoughts_tokens ?? tokenCount.reasoning_tokens)
+  });
+}
+
+/** Generic `usage` object covering both the OpenAI dialect (Grok/xAI, Qwen:
+ *  `prompt_tokens`/`completion_tokens`, nested `*_tokens_details`) and the
+ *  Anthropic dialect (`input_tokens`/`output_tokens`, `cache_read_input_tokens`). */
+function usageFromGenericUsage(usage: Record<string, unknown>): NormalizedTokenUsage | undefined {
+  const promptDetails = asRecord(usage.prompt_tokens_details);
+  const completionDetails = asRecord(usage.completion_tokens_details);
+  return assembleUsage({
+    input: usageNum(usage.prompt_tokens ?? usage.input_tokens),
+    output: usageNum(usage.completion_tokens ?? usage.output_tokens),
+    cached: usageNum(
+      promptDetails?.cached_tokens ??
+        usage.cache_read_input_tokens ??
+        usage.cached_tokens ??
+        usage.cached_input_tokens
+    ),
+    reasoning: usageNum(
+      completionDetails?.reasoning_tokens ?? usage.reasoning_tokens ?? usage.thoughts_tokens
+    ),
+    total: usageNum(usage.total_tokens)
+  });
+}
+
+/** Read token usage from a `session/prompt` response. Agents disagree on shape:
+ *  - Gemini: `_meta.quota.token_count.{input_tokens,output_tokens,…}`
+ *  - OpenAI dialect (Grok/xAI, Qwen): `usage.{prompt_tokens,completion_tokens,…}`
+ *    — at the result root OR under `_meta`.
+ *  - Anthropic dialect: `usage.{input_tokens,output_tokens,cache_read_input_tokens}`.
+ *  Returns undefined when nothing recognizable is present. */
+function readAcpPromptUsage(result: unknown): NormalizedTokenUsage | undefined {
+  const root = asRecord(result);
+  const meta = asRecord(root?._meta);
+
+  const tokenCount = asRecord(asRecord(meta?.quota)?.token_count);
+  if (tokenCount) {
+    const fromGemini = usageFromGeminiQuota(tokenCount);
+    if (fromGemini) return fromGemini;
+  }
+
+  // OpenAI / Anthropic `usage` object — at the result root or under `_meta`.
+  const usageObj = asRecord(root?.usage) ?? asRecord(meta?.usage);
+  if (usageObj) {
+    const fromGeneric = usageFromGenericUsage(usageObj);
+    if (fromGeneric) return fromGeneric;
+  }
+
+  return undefined;
+}
+
+/** Compact description of WHERE usage-like keys live in a prompt response, for a
+ *  one-line debug log when `readAcpPromptUsage` finds nothing. Never logs values
+ *  — only the key paths present — so it's safe to emit and reveals a new agent's
+ *  usage shape without a full payload dump. */
+function describeUsageShape(result: unknown): string {
+  const root = asRecord(result);
+  if (!root) return typeof result;
+  const paths: string[] = [];
+  const walk = (record: Record<string, unknown>, prefix: string, depth: number): void => {
+    for (const [key, value] of Object.entries(record)) {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (/token|usage|quota/i.test(key)) paths.push(path);
+      const child = asRecord(value);
+      if (child && depth < 3) walk(child, path, depth + 1);
+    }
+  };
+  walk(root, "", 0);
+  return paths.length > 0 ? paths.join(", ") : `keys: ${Object.keys(root).join(", ")}`;
 }
