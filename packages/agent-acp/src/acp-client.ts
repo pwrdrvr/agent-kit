@@ -288,13 +288,22 @@ export class AcpAgentClient implements AgentBackend {
       const session = this.sessions.get(result.threadId);
       if (session) session.pendingInstructions = options.instructions;
     }
+    // Report the model that ACTUALLY runs. `result.model` is the session/new
+    // default (currentModelId); `setModel` may or may not apply the requested
+    // one. If it applies, the effective model is the request; if it fails (e.g.
+    // an unknown/stale id), the agent keeps its default — so a caller must NOT
+    // report the requested id. Track the outcome and return the effective model.
     if (options.model !== undefined) {
-      await this.setModel(result.threadId, options.model).catch((cause) => {
-        this.logger.debug("acp startThread: model selection not applied", {
-          model: options.model,
-          message: cause instanceof Error ? cause.message : String(cause)
+      const applied = await this.setModel(result.threadId, options.model)
+        .then(() => true)
+        .catch((cause) => {
+          this.logger.debug("acp startThread: model selection not applied", {
+            model: options.model,
+            message: cause instanceof Error ? cause.message : String(cause)
+          });
+          return false;
         });
-      });
+      if (applied) return { ...result, model: options.model };
     }
     return result;
   }

@@ -1,5 +1,17 @@
 # @pwrdrvr/agent-acp
 
+## 0.10.2
+
+### Patch Changes
+
+- Report the model that actually ran from `AcpOneShotClient`, not the requested
+  one. `startThread` swallowed whether `setModel` applied, so a one-shot response
+  echoed the requested model id even when the agent rejected it (e.g. a stale
+  cross-provider id Grok ignores). It now tracks the `setModel` outcome and
+  returns the effective model — the requested id only when applied, otherwise the
+  agent's own session default (or `""` when none is advertised). Fixes a host
+  pricing/usage UI showing a rejected model id for the run.
+
 ## 0.10.1
 
 ### Patch Changes

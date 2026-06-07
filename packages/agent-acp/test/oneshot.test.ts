@@ -172,6 +172,37 @@ describe("AcpOneShotClient", () => {
     await client.close();
   });
 
+  it("reports the requested model when set_model applies", async () => {
+    const transport = new FakeAcpAgentTransport(); // set_model returns {} → applies
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x", model: "grok-4-fast" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({ stopReason: "end_turn" });
+    const response = await pending;
+    expect(response.model).toBe("grok-4-fast");
+    await client.close();
+  });
+
+  it("does NOT report a stale model the agent rejected (reports the effective model)", async () => {
+    // Grok refuses `session/set_model` for a Codex id → the agent keeps its own
+    // model. The response must NOT echo the rejected id (the bug: pricing UI
+    // showed "gpt-5.4-mini" for a Grok run). With no advertised default the fake
+    // surfaces "" → "model unavailable", which is honest, not a lie.
+    const transport = new FakeAcpAgentTransport({
+      "session/set_model": new Error("unknown model: gpt-5.4-mini")
+    });
+    const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
+    const pending = client.run({ prompt: "x", model: "gpt-5.4-mini" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({ stopReason: "end_turn" });
+    const response = await pending;
+    expect(response.model).not.toBe("gpt-5.4-mini");
+    expect(response.model).toBe("");
+    await client.close();
+  });
+
   it("returns null usage when the response carries no recognizable shape", async () => {
     const transport = new FakeAcpAgentTransport();
     const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });

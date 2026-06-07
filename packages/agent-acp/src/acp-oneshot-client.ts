@@ -157,7 +157,13 @@ export class AcpOneShotClient {
         rawText,
         threadId: thread.threadId,
         turnId,
-        model: request.model ?? thread.model ?? "",
+        // `thread.model` is the EFFECTIVE model — startThread sets it to the
+        // requested id ONLY when setModel applied, otherwise it's the agent's
+        // session default (or "" when none is advertised). We deliberately do
+        // NOT fall back to `request.model`: a stale/unknown id the agent ignored
+        // must never be reported as what ran (showing "" → "model unavailable"
+        // is honest; showing the rejected id is a lie).
+        model: thread.model ?? "",
         modelProvider: thread.modelProvider ?? this.strategy.backendId,
         serviceTier: thread.serviceTier ?? null,
         tokenUsage: usage

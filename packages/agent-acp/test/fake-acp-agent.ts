@@ -41,7 +41,11 @@ export class FakeAcpAgentTransport implements AcpJsonRpcTransport {
       ...(timeoutMs !== undefined ? { timeoutMs } : {})
     });
     if (method in this.responses) {
-      return this.responses[method];
+      const canned = this.responses[method];
+      // An Error response means "this RPC rejects" — lets tests simulate e.g.
+      // an agent refusing `session/set_model` for an unknown model id.
+      if (canned instanceof Error) throw canned;
+      return canned;
     }
     if (method === "initialize") {
       return { protocolVersion: 1 };
