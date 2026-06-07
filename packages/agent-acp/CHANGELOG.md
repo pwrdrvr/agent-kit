@@ -1,5 +1,17 @@
 # @pwrdrvr/agent-acp
 
+## 0.10.3
+
+### Patch Changes
+
+- Serialize JSON-RPC error objects into readable messages. `errorMessage` (used
+  for turn errors and the "model selection not applied" log) did `String(error)`,
+  which renders a plain JSON-RPC error object (`{ code, message, data }`) as the
+  useless `[object Object]`. It now extracts the error's `message` (+ `code`),
+  falls back to a JSON dump, and never returns `[object Object]` or a literal
+  `"undefined"`. This surfaces _why_ an agent rejected a request — e.g. why Grok
+  refuses `session/set_model` for an advertised model.
+
 ## 0.10.2
 
 ### Patch Changes

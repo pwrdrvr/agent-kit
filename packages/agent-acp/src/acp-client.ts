@@ -299,7 +299,7 @@ export class AcpAgentClient implements AgentBackend {
         .catch((cause) => {
           this.logger.debug("acp startThread: model selection not applied", {
             model: options.model,
-            message: cause instanceof Error ? cause.message : String(cause)
+            message: errorMessage(cause)
           });
           return false;
         });
@@ -1162,9 +1162,31 @@ function mimeTypeForImagePath(imagePath: string): string {
   }
 }
 
-function errorMessage(error: unknown): string {
+/** Render an unknown thrown value as a readable string. Exported for testing. */
+export function errorMessage(error: unknown): string {
+  if (error === undefined || error === null) return "Turn failed.";
   if (error instanceof Error && error.message.trim()) {
     return error.message;
+  }
+  // JSON-RPC errors reject as PLAIN OBJECTS ({ code, message, data }), not
+  // Errors — `String(obj)` is the useless "[object Object]". Pull out a readable
+  // message (+ code), falling back to a JSON dump, so callers/logs see why the
+  // agent refused (e.g. why `session/set_model` was rejected).
+  if (error !== null && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) {
+      const code = typeof record.code === "number" ? ` (${record.code})` : "";
+      return `${record.message.trim()}${code}`;
+    }
+    try {
+      const json = JSON.stringify(error);
+      if (json !== undefined && json !== "{}" && json !== "[]") return json;
+    } catch {
+      // non-serializable → fall through
+    }
+    // An object with nothing useful — return the default rather than letting it
+    // reach String(), which would produce the useless "[object Object]".
+    return "Turn failed.";
   }
   const message = String(error).trim();
   return message || "Turn failed.";
