@@ -35,6 +35,26 @@ pnpm test          # vitest
 pnpm lint:licenses # MIT-only gate
 ```
 
+## zod: two copies, on purpose — do NOT dedupe
+
+`@pwrdrvr/agent-acp` speaks ACP through
+[`@zed-industries/agent-client-protocol`](https://www.npmjs.com/package/@zed-industries/agent-client-protocol),
+which pins **`zod@^3`** (latest `0.4.5`). First-party packages here
+(`@pwrdrvr/agent-client`, and consumers like PwrAgent / PwrSnap) use **`zod@^4`**.
+So an app depending on both resolves **two copies of zod** (a `zod@3.x` only the
+zed lib sees, and the `zod@4.x` everything else uses).
+
+**Leave it that way.** zod 3 and zod 4 are not API-compatible — the thing that
+needs zod 3 has to run on zod 3, the thing that needs zod 4 on zod 4. Do **not**
+try to collapse them with a `pnpm.overrides.zod` / `resolutions` pin in either
+direction: forcing the zed lib onto zod 4 (or first-party code onto zod 3) runs
+code against a major it wasn't written for. The two copies are isolated —
+agent-acp imports nothing from zod directly, so no zod schema crosses the package
+boundary where the duplicate would matter.
+
+This split disappears on its own once the zed lib ships a zod-4 build; until
+then, two copies is the correct, intended state.
+
 ## Release
 
 Versioning is per-package via [changesets](https://github.com/changesets/changesets):
