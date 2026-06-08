@@ -89,6 +89,14 @@ export function sanitizeAcpNotificationLine(line: string): string {
   if (!isPlainObject(params)) return line;
   const update = params.update;
   if (!isPlainObject(update)) return line;
+  // The library's session-update schema has no `config_option_update` variant
+  // (it isn't in ACP's stable surface), so an agent that echoes a config change
+  // — e.g. Kimi confirming a `session/set_config_option` (thinking on/off) —
+  // fails validation and the library logs "Error handling notification"
+  // (-32602). The validated path can't deliver it to any consumer regardless,
+  // so DROP the line (empty return; the stream skips it) instead of letting it
+  // spam errors on every config change.
+  if (update.sessionUpdate === "config_option_update") return "";
   let changed = false;
   for (const key of ["rawInput", "rawOutput"] as const) {
     if (!(key in update)) continue;
@@ -120,13 +128,17 @@ function sanitizeInboundStream(
         while (nl !== -1) {
           const line = buffer.slice(0, nl);
           buffer = buffer.slice(nl + 1);
-          controller.enqueue(encoder.encode(sanitizeAcpNotificationLine(line) + "\n"));
+          // An empty result means "drop this line" (e.g. a config_option_update
+          // the library can't parse) — skip it so the library never sees it.
+          const sanitized = sanitizeAcpNotificationLine(line);
+          if (sanitized.length > 0) controller.enqueue(encoder.encode(sanitized + "\n"));
           nl = buffer.indexOf("\n");
         }
       },
       flush(controller) {
         if (buffer.length > 0) {
-          controller.enqueue(encoder.encode(sanitizeAcpNotificationLine(buffer)));
+          const sanitized = sanitizeAcpNotificationLine(buffer);
+          if (sanitized.length > 0) controller.enqueue(encoder.encode(sanitized));
           buffer = "";
         }
       }
