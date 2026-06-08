@@ -268,4 +268,30 @@ describe("sanitizeAcpNotificationLine", () => {
     expect(sanitizeAcpNotificationLine("not json at all")).toBe("not json at all");
     expect(sanitizeAcpNotificationLine("")).toBe("");
   });
+
+  it("DROPS a config_option_update notification (library schema has no such variant)", () => {
+    // Kimi echoes a config_option_update after a set_config_option; the library
+    // can't parse it (→ "Error handling notification" -32602). Empty return = drop.
+    const configUpdate = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: {
+        sessionId: "s",
+        update: {
+          sessionUpdate: "config_option_update",
+          configOptions: [{ id: "thinking", currentValue: "off" }]
+        }
+      }
+    });
+    expect(sanitizeAcpNotificationLine(configUpdate)).toBe("");
+  });
+
+  it("leaves a recognized session/update (agent_message_chunk) untouched", () => {
+    const chunk = JSON.stringify({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", content: "hi" } }
+    });
+    expect(sanitizeAcpNotificationLine(chunk)).toBe(chunk);
+  });
 });
