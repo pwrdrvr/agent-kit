@@ -2,11 +2,82 @@ import { describe, expect, it } from "vitest";
 import type { AgentBackend, NormalizedThreadEvent } from "@pwrdrvr/agent-core";
 import {
   normalizeAcpRuntimeCapabilities,
-  acpSessionRuntimeStateFromUpdate
+  acpSessionRuntimeStateFromUpdate,
+  modelIdFromCapabilities,
+  modelsFromCapabilities
 } from "../src/normalizer/runtime-capabilities";
 import { AcpAgentClient } from "../src/acp-client";
 import { geminiStrategy } from "../src/strategies/index";
 import { FakeAcpAgentTransport } from "./fake-acp-agent";
+
+// A Kimi-style session/new payload: model + thinking exposed as configOptions,
+// NOT as top-level `models` (which Kimi never advertises).
+const KIMI_CONFIG_OPTIONS = {
+  configOptions: [
+    {
+      type: "select",
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "kimi-code/kimi-for-coding",
+      options: [{ value: "kimi-code/kimi-for-coding", name: "Kimi-k2.6" }]
+    },
+    {
+      type: "select",
+      id: "thinking",
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: "on",
+      options: [
+        { value: "off", name: "Thinking Off" },
+        { value: "on", name: "Thinking On" }
+      ]
+    }
+  ]
+};
+
+describe("modelIdFromCapabilities / modelsFromCapabilities", () => {
+  it("reads the effective model from a `model` configOption (Kimi)", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "session-new",
+      value: KIMI_CONFIG_OPTIONS
+    });
+    expect(caps?.models).toBeUndefined();
+    expect(modelIdFromCapabilities(caps)).toBe("kimi-code/kimi-for-coding");
+  });
+
+  it("derives a model list (with label + isDefault) from the `model` configOption", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "session-new",
+      value: KIMI_CONFIG_OPTIONS
+    });
+    expect(modelsFromCapabilities(caps)).toEqual([
+      { id: "kimi-code/kimi-for-coding", label: "Kimi-k2.6", isDefault: true }
+    ]);
+  });
+
+  it("prefers top-level models when the agent advertises them (Gemini)", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "session-new",
+      value: { models: { availableModels: [{ id: "gemini-3-flash" }], currentModelId: "gemini-3-flash" } }
+    });
+    expect(modelIdFromCapabilities(caps)).toBe("gemini-3-flash");
+    expect(modelsFromCapabilities(caps).map((m) => m.id)).toEqual(["gemini-3-flash"]);
+  });
+
+  it("returns undefined / [] when no model is advertised", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "session-new",
+      value: { modes: { availableModes: [{ id: "plan" }] } }
+    });
+    expect(modelIdFromCapabilities(caps)).toBeUndefined();
+    expect(modelsFromCapabilities(caps)).toEqual([]);
+  });
+});
 
 describe("normalizeAcpRuntimeCapabilities — merge over initialize", () => {
   it("reads models/modes camel + snake tolerantly", () => {

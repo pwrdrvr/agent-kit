@@ -15,6 +15,7 @@ export type { AcpJsonRpcTransport } from "./acp-transport";
 
 export {
   AcpAgentClient,
+  reasoningValueForThoughtLevel,
   type AcpAgentClientOptions,
   type AcpStartThreadOptions,
   type AcpStartTurnOptions,
@@ -73,6 +74,9 @@ export {
   acpSessionRuntimeStateFromUpdate,
   mergeAcpRuntimeState,
   modeLabelFor,
+  modelConfigOption,
+  modelIdFromCapabilities,
+  modelsFromCapabilities,
   type AcpRuntimeCapabilities,
   type AcpRuntimeCapabilitiesSource,
   type AcpRuntimeConfigOption,

@@ -47,8 +47,10 @@ import {
   acpSessionRuntimeStateFromUpdate,
   mergeAcpRuntimeState,
   modeLabelFor,
+  modelIdFromCapabilities,
   normalizeAcpRuntimeCapabilities,
   type AcpRuntimeCapabilities,
+  type AcpRuntimeConfigOptionValue,
   type AcpSessionRuntimeState
 } from "./normalizer/runtime-capabilities";
 import type { AcpJsonRpcTransport } from "./acp-transport";
@@ -462,7 +464,9 @@ export class AcpAgentClient implements AgentBackend {
       resumed: options.bindThreadId !== undefined
     });
     const out: AgentBackendStartThreadResult = { threadId };
-    const model = runtimeCapabilities?.models?.currentModelId;
+    // Effective model — prefers `models.currentModelId`, falling back to the
+    // `model` configOption for agents (Kimi) that advertise model choice there.
+    const model = modelIdFromCapabilities(runtimeCapabilities);
     if (model !== undefined) out.model = model;
     out.modelProvider = this.strategy.id;
     return out;
@@ -919,23 +923,48 @@ export class AcpAgentClient implements AgentBackend {
     });
   }
 
-  /** Map a neutral `reasoning` token onto an ACP runtime option. We try to match
-   *  it to an available MODE (by id or label, case-insensitively) and switch via
-   *  `session/set_mode`. ACP has no first-class "reasoning effort" concept, so if
-   *  no mode matches we leave it alone — the caller's `.catch` debug-logs. */
+  /** Map a neutral `reasoning` token onto an ACP runtime option. ACP has no
+   *  first-class "reasoning effort" concept, so we map it to whatever the agent
+   *  exposes, in order:
+   *    1. An available MODE whose id/label matches the token (set_mode).
+   *    2. A "thinking" config option (`category: "thought_level"`, or id
+   *       `thinking`) — map low-effort tokens to its OFF-like value and
+   *       high-effort tokens to its ON-like value (set_config_option). This is
+   *       what lets a one-shot enrichment turn ("low") disable a reasoning
+   *       model's thinking pass, which is dramatically faster.
+   *  If nothing matches we leave it alone — the caller's `.catch` debug-logs. */
   private async applyReasoning(threadId: string, reasoning: string): Promise<void> {
-    const modes = this.runtimeCapabilities?.modes?.availableModes ?? [];
     const target = reasoning.toLowerCase();
-    const match = modes.find(
+    const modes = this.runtimeCapabilities?.modes?.availableModes ?? [];
+    const modeMatch = modes.find(
       (mode) =>
         mode.id.toLowerCase() === target ||
         (typeof mode.label === "string" && mode.label.toLowerCase() === target)
     );
-    if (match === undefined) {
-      this.logger.debug("acp reasoning has no matching mode — ignored", { reasoning });
+    if (modeMatch !== undefined) {
+      await this.setMode(threadId, modeMatch.id);
       return;
     }
-    await this.setMode(threadId, match.id);
+    const thinking = this.runtimeCapabilities?.configOptions?.find(
+      (option) => option.category === "thought_level" || option.id === "thinking"
+    );
+    if (thinking !== undefined) {
+      const value = reasoningValueForThoughtLevel(target, thinking.values);
+      if (value === undefined) {
+        this.logger.debug("acp reasoning has no matching thought-level value — ignored", {
+          reasoning
+        });
+        return;
+      }
+      // Already at the desired value → no redundant set_config_option round-trip.
+      if (value !== thinking.currentValue) {
+        await this.setConfigOption(threadId, thinking.id, value);
+      }
+      return;
+    }
+    this.logger.debug("acp reasoning has no matching mode or thought-level option — ignored", {
+      reasoning
+    });
   }
 
   /** Read an image file and build an ACP `image` content block (base64 + inferred
@@ -986,7 +1015,7 @@ export class AcpAgentClient implements AgentBackend {
   ): void {
     const settings: NormalizedThreadSettings = { threadId: session.threadId };
     const model =
-      runtimeState?.currentModelId ?? capabilities?.models?.currentModelId;
+      runtimeState?.currentModelId ?? modelIdFromCapabilities(capabilities);
     if (model !== undefined) settings.model = model;
     settings.modelProvider = this.strategy.id;
     const modeId =
@@ -1011,6 +1040,55 @@ export class AcpAgentClient implements AgentBackend {
   supportsSessionLoad(): boolean {
     return acpRuntimeSupportsSessionLoad(this.runtimeCapabilities);
   }
+}
+
+/** Effort tokens that mean "deliberate as little as possible" → thinking OFF. */
+const LOW_EFFORT_TOKENS = new Set([
+  "off",
+  "none",
+  "minimal",
+  "min",
+  "minimum",
+  "low",
+  "fast"
+]);
+/** Effort tokens that mean "deliberate fully" → thinking ON. */
+const HIGH_EFFORT_TOKENS = new Set([
+  "on",
+  "high",
+  "medium",
+  "max",
+  "maximum",
+  "full",
+  "think"
+]);
+
+/** Classify a thinking/thought-level option VALUE as on/off-like from its value
+ *  id + label (e.g. `{ value: "off", label: "Thinking Off" }` → "off"). */
+function thoughtLevelPolarity(
+  value: AcpRuntimeConfigOptionValue
+): "on" | "off" | "other" {
+  const haystack = `${value.value} ${value.label ?? ""}`.toLowerCase();
+  if (/\b(off|none|disabled?|no)\b/.test(haystack)) return "off";
+  if (/\b(on|enabled?|high|full|yes)\b/.test(haystack)) return "on";
+  return "other";
+}
+
+/** Pick the value to set on a "thinking" config option for a neutral reasoning
+ *  token: low-effort → the OFF-like value, high-effort → the ON-like value.
+ *  Returns undefined when the token isn't an effort signal we recognize, or the
+ *  option has no value of the needed polarity (caller leaves the option alone).
+ *  Exported for testing. */
+export function reasoningValueForThoughtLevel(
+  reasoning: string,
+  values: ReadonlyArray<AcpRuntimeConfigOptionValue>
+): string | undefined {
+  const token = reasoning.toLowerCase();
+  const wantOff = LOW_EFFORT_TOKENS.has(token);
+  const wantOn = HIGH_EFFORT_TOKENS.has(token);
+  if (!wantOff && !wantOn) return undefined;
+  const desired = wantOff ? "off" : "on";
+  return values.find((value) => thoughtLevelPolarity(value) === desired)?.value;
 }
 
 function buildApprovalRequest(args: {

@@ -22,6 +22,48 @@ const strategy: AcpAgentStrategy = {
   quirks: defaultQuirks()
 };
 
+// Kimi exposes model + thinking as `configOptions` (never top-level `models`).
+const kimiStrategy: AcpAgentStrategy = {
+  id: "kimi",
+  backendId: buildAcpBackendId("kimi"),
+  displayName: "Kimi Code CLI",
+  authors: ["Moonshot AI"],
+  discoveryProbe: {
+    command: "kimi",
+    versionArgs: ["--version"],
+    helpArgs: ["acp", "--help"]
+  },
+  spawn: { command: "kimi", args: ["acp"] },
+  quirks: defaultQuirks({ surfaceThoughts: true })
+};
+
+/** A Kimi-style `session/new` result. `sessionId: "session-1"` keeps the fake's
+ *  `emitSessionUpdate("session-1", …)` / `finishPrompt()` helpers working. */
+const KIMI_SESSION_NEW = {
+  sessionId: "session-1",
+  configOptions: [
+    {
+      type: "select",
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: "kimi-code/kimi-for-coding",
+      options: [{ value: "kimi-code/kimi-for-coding", name: "Kimi-k2.6" }]
+    },
+    {
+      type: "select",
+      id: "thinking",
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: "on",
+      options: [
+        { value: "off", name: "Thinking Off" },
+        { value: "on", name: "Thinking On" }
+      ]
+    }
+  ]
+};
+
 /** Let the in-flight runInner reach the pending `session/prompt` before the
  *  test drives the fake. */
 function tick(ms = 10): Promise<void> {
@@ -220,6 +262,54 @@ describe("AcpOneShotClient", () => {
     const client = new AcpOneShotClient({ transport, strategy, now: () => 1 });
     const models = await client.listModels();
     expect(Array.isArray(models)).toBe(true);
+    await client.close();
+  });
+
+  it("reports the model from a `model` configOption when no top-level models (Kimi)", async () => {
+    const transport = new FakeAcpAgentTransport({ "session/new": KIMI_SESSION_NEW });
+    const client = new AcpOneShotClient({ transport, strategy: kimiStrategy, now: () => 1 });
+    const pending = client.run({ prompt: "x", effort: "low" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({ stopReason: "end_turn" });
+    const response = await pending;
+    expect(response.model).toBe("kimi-code/kimi-for-coding");
+    await client.close();
+  });
+
+  it("maps low effort to thinking=off via set_config_option (thought_level agent)", async () => {
+    const transport = new FakeAcpAgentTransport({ "session/new": KIMI_SESSION_NEW });
+    const client = new AcpOneShotClient({ transport, strategy: kimiStrategy, now: () => 1 });
+    const pending = client.run({ prompt: "x", effort: "low" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({ stopReason: "end_turn" });
+    await pending;
+    const setCfg = transport.requests.find((r) => r.method === "session/set_config_option");
+    expect(setCfg?.params).toMatchObject({ configId: "thinking", value: "off" });
+    await client.close();
+  });
+
+  it("skips the set_config_option round-trip when effort already matches current value", async () => {
+    // Kimi's thinking defaults to "on"; effort "high" → "on" → no redundant call.
+    const transport = new FakeAcpAgentTransport({ "session/new": KIMI_SESSION_NEW });
+    const client = new AcpOneShotClient({ transport, strategy: kimiStrategy, now: () => 1 });
+    const pending = client.run({ prompt: "x", effort: "high" });
+    await tick();
+    transport.emitSessionUpdate("session-1", { sessionUpdate: "agent_message_chunk", content: "ok" });
+    transport.finishPrompt({ stopReason: "end_turn" });
+    await pending;
+    expect(transport.requests.some((r) => r.method === "session/set_config_option")).toBe(false);
+    await client.close();
+  });
+
+  it("listModels derives the model list from the `model` configOption (Kimi)", async () => {
+    const transport = new FakeAcpAgentTransport({ "session/new": KIMI_SESSION_NEW });
+    const client = new AcpOneShotClient({ transport, strategy: kimiStrategy, now: () => 1 });
+    const models = await client.listModels();
+    expect(models).toEqual([
+      { id: "kimi-code/kimi-for-coding", label: "Kimi-k2.6", isDefault: true }
+    ]);
     await client.close();
   });
 
