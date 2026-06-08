@@ -134,6 +134,64 @@ function sanitizeInboundStream(
   );
 }
 
+/** Rewrite an OUTBOUND ndjson request line to fix the config-option method name.
+ *
+ *  ACP config options aren't a typed method in the underlying library, so the
+ *  generic `request()` path routes `session/set_config_option` through the
+ *  library's `extMethod`, which prefixes EVERY extension method with `_` (the
+ *  spec's marker for non-standard methods) → `_session/set_config_option`.
+ *  Agents that implement config options (e.g. Kimi) expose them WITHOUT the
+ *  underscore and reject the prefixed name with "Method not found", so the
+ *  thinking/thought-level toggle silently never applies. Strip the prefix for
+ *  this one method on the way out. JSON-RPC correlates responses by `id`, so the
+ *  rewritten method name doesn't affect the library's pending-request matching.
+ *  Exported for testing. */
+export function rewriteOutboundAcpLine(line: string): string {
+  if (line.trim().length === 0) return line;
+  let message: unknown;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return line; // not JSON (or a partial line) — never our concern.
+  }
+  if (!isPlainObject(message) || message.method !== "_session/set_config_option") {
+    return line;
+  }
+  message.method = "session/set_config_option";
+  return JSON.stringify(message);
+}
+
+/** Wrap an agent's stdin so every OUTBOUND ndjson line is passed through
+ *  `rewriteOutboundAcpLine` before it reaches the agent. Returns the
+ *  WritableStream the library writes to; rewritten bytes flow to `target`. */
+function rewriteOutboundStream(
+  target: WritableStream<Uint8Array>
+): WritableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl = buffer.indexOf("\n");
+      while (nl !== -1) {
+        const line = buffer.slice(0, nl);
+        buffer = buffer.slice(nl + 1);
+        controller.enqueue(encoder.encode(rewriteOutboundAcpLine(line) + "\n"));
+        nl = buffer.indexOf("\n");
+      }
+    },
+    flush(controller) {
+      if (buffer.length > 0) {
+        controller.enqueue(encoder.encode(rewriteOutboundAcpLine(buffer)));
+        buffer = "";
+      }
+    }
+  });
+  void transform.readable.pipeTo(target).catch(() => undefined);
+  return transform.writable;
+}
+
 export class AcpConnection implements AcpJsonRpcTransport {
   private readonly logger: Logger;
   private connection: AcpAgentConnection | undefined;
@@ -221,7 +279,12 @@ export class AcpConnection implements AcpJsonRpcTransport {
       });
       // ndJsonStream(writeToAgentStdin, readFromAgentStdout) — arg order: first is
       // the WritableStream we send to, second is the ReadableStream we read from.
-      const toAgentStdin = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
+      // Rewrite outbound `_session/set_config_option` → `session/set_config_option`
+      // (the library prefixes extension methods with `_`, which config-option
+      // agents like Kimi reject). See `rewriteOutboundAcpLine`.
+      const toAgentStdin = rewriteOutboundStream(
+        Writable.toWeb(child.stdin) as WritableStream<Uint8Array>
+      );
       // Sanitize inbound ndjson BEFORE the library frames + schema-validates it,
       // so a non-spec `rawInput`/`rawOutput` (e.g. Kimi's string/array tool
       // output) doesn't get the whole notification rejected. See
