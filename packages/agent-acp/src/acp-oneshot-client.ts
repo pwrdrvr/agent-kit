@@ -30,7 +30,10 @@ import {
 import { AcpAgentClient } from "./acp-client";
 import type { AcpJsonRpcTransport } from "./acp-transport";
 import type { AcpAgentStrategy } from "./strategies/strategy-types";
-import type { AcpRuntimeModel } from "./normalizer/runtime-capabilities";
+import {
+  modelsFromCapabilities,
+  type AcpRuntimeModel
+} from "./normalizer/runtime-capabilities";
 
 export type AcpOneShotClientOptions = {
   /** Connected (or lazily-connecting) ACP stdio transport for the agent. */
@@ -188,8 +191,11 @@ export class AcpOneShotClient {
   private async listModelsInner(): Promise<AcpRuntimeModel[]> {
     let models: AcpRuntimeModel[] = [];
     const unsubscribe = this.client.onRuntimeCapabilities((event) => {
-      const observed = event.runtimeCapabilities.models?.availableModels;
-      if (observed !== undefined && observed.length > 0) models = observed;
+      // `modelsFromCapabilities` reads `models.availableModels` when present and
+      // otherwise derives the list from the `model` configOption (Kimi), so a
+      // host caches a model id + label for either advertisement style.
+      const observed = modelsFromCapabilities(event.runtimeCapabilities);
+      if (observed.length > 0) models = observed;
     });
     try {
       // `session/new` triggers the runtime-capabilities notification

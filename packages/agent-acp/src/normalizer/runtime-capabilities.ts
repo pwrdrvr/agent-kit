@@ -169,6 +169,48 @@ export function acpRuntimeSupportsSessionLoad(
   return capabilities?.agentCapabilities?.loadSession !== false;
 }
 
+/** The configOption an agent uses to expose model choice (ACP `category:
+ *  "model"`, falling back to a literal `model` id). Some agents (e.g. Kimi)
+ *  advertise the active model HERE rather than via top-level
+ *  `models.currentModelId`. */
+export function modelConfigOption(
+  capabilities: AcpRuntimeCapabilities | undefined
+): AcpRuntimeConfigOption | undefined {
+  return capabilities?.configOptions?.find(
+    (option) => option.category === "model" || option.id === "model"
+  );
+}
+
+/** The effective model id the agent will run with, agnostic of HOW it advertises
+ *  it. Prefers a protocol-confirmed `models.currentModelId`; falls back to the
+ *  `model` configOption's `currentValue` for agents that expose model choice as a
+ *  config option (Kimi). Returns undefined when the agent advertises no model at
+ *  all — callers report that as "no model" rather than inventing one. */
+export function modelIdFromCapabilities(
+  capabilities: AcpRuntimeCapabilities | undefined
+): string | undefined {
+  return capabilities?.models?.currentModelId ?? modelConfigOption(capabilities)?.currentValue;
+}
+
+/** The full model list a host can render/cache, agnostic of advertisement style.
+ *  Returns `models.availableModels` when present; otherwise derives the list from
+ *  the `model` configOption's values (Kimi), preserving labels/descriptions and
+ *  flagging the current value as default. `[]` when no model is advertised. */
+export function modelsFromCapabilities(
+  capabilities: AcpRuntimeCapabilities | undefined
+): AcpRuntimeModel[] {
+  const advertised = capabilities?.models?.availableModels;
+  if (advertised !== undefined && advertised.length > 0) return advertised;
+  const option = modelConfigOption(capabilities);
+  if (option === undefined) return [];
+  return option.values.map((value) => ({
+    id: value.value,
+    ...(value.label !== undefined ? { label: value.label } : {}),
+    ...(value.description !== undefined ? { description: value.description } : {}),
+    ...(option.currentValue === value.value ? { isDefault: true } : {})
+  }));
+}
+
 export function acpSessionRuntimeStateFromCapabilities(
   capabilities: AcpRuntimeCapabilities | undefined,
   now: number
