@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { sessionNotificationSchema, type Client } from "@zed-industries/agent-client-protocol";
 import {
   AcpConnection,
+  rewriteOutboundAcpLine,
   sanitizeAcpNotificationLine,
   type AcpAgentConnection
 } from "../src/acp-connection";
@@ -148,6 +149,42 @@ describe("AcpConnection — bridges agent→client traffic to onNotification/onR
     await expect(client().requestPermission({ sessionId: "sess-1" } as never)).rejects.toThrow(
       /request handler unavailable/
     );
+  });
+});
+
+describe("rewriteOutboundAcpLine", () => {
+  it("strips the `_` prefix the library adds to session/set_config_option", () => {
+    const out = rewriteOutboundAcpLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "_session/set_config_option",
+        params: { sessionId: "s", configId: "thinking", value: "off" }
+      })
+    );
+    const parsed = JSON.parse(out);
+    expect(parsed.method).toBe("session/set_config_option");
+    // id + params preserved (id-based correlation must still match).
+    expect(parsed.id).toBe(7);
+    expect(parsed.params).toEqual({ sessionId: "s", configId: "thinking", value: "off" });
+  });
+
+  it("leaves the standard (already-bare) config-option method untouched", () => {
+    const line = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/set_config_option", params: {} });
+    expect(rewriteOutboundAcpLine(line)).toBe(line);
+  });
+
+  it("leaves other extension methods and standard methods untouched", () => {
+    const vendor = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "_session/vendor_thing", params: {} });
+    expect(rewriteOutboundAcpLine(vendor)).toBe(vendor);
+    const prompt = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: {} });
+    expect(rewriteOutboundAcpLine(prompt)).toBe(prompt);
+  });
+
+  it("passes non-JSON / empty / partial lines through unchanged", () => {
+    expect(rewriteOutboundAcpLine("")).toBe("");
+    expect(rewriteOutboundAcpLine("not json")).toBe("not json");
+    expect(rewriteOutboundAcpLine('{"partial":')).toBe('{"partial":');
   });
 });
 
