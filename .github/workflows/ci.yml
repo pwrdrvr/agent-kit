@@ -27,6 +27,13 @@ jobs:
       - name: License policy
         run: pnpm lint:licenses
 
+      # Singleton-dependency guard: zod (and any other identity-sensitive lib we
+      # add) must resolve to exactly one version. The zed ACP lib pins zod ^3
+      # while first-party packages use zod ^4; the root pnpm.overrides collapses
+      # that to one copy, and this fails CI if a second copy ever creeps back in.
+      - name: Single-version deps
+        run: pnpm lint:deps
+
       # Enforce the layered package graph: no cycles, agent-core + agent-chat-react
       # stay browser-safe (no node: builtins), and each package only reaches its
       # allowed siblings. Runs on source, no build needed.
