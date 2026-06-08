@@ -16,6 +16,7 @@
     "test": "pnpm -r test",
     "lint:licenses": "node scripts/check-package-license-policy.mjs",
     "lint:boundaries": "depcruise --config .dependency-cruiser.cjs packages/",
+    "lint:deps": "node scripts/check-single-version-deps.mjs",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm build && changeset publish"
@@ -30,6 +31,9 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ]
+    ],
+    "overrides": {
+      "zod": "^4.0.0"
+    }
   }
 }
