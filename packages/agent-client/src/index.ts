@@ -1,15 +1,37 @@
 // @pwrdrvr/agent-client — Codex App Server adapter for agent-kit.
 //
-// Three surfaces, all normalizing into the agent-core neutral schema:
-//   • CodexThreadClient   — long-lived, multi-turn thread client (normalized
-//                           event stream + injected tool/approval handlers);
-//   • CodexOneShotClient  — one-shot structured-output enrichment turns;
-//   • ChatThreadController — surface-agnostic chat controller over the thread
-//                            client, with persistence + prompt + catalog seams
-//                            injected by the host.
+// Surfaces, all normalizing into the agent-core neutral schema:
+//   • CodexProcessOwner   — owns ONE codex app-server process + connection and
+//                           hands out per-surface backend VIEWS (each an
+//                           AgentBackend whose threads route to its own
+//                           handlers), plus model listing + structured one-shot
+//                           over the shared connection. Pool it for the app.
+//   • CodexBackendView    — a lightweight per-surface AgentBackend over an owner;
+//                           sibling surfaces sharing one process never clobber.
+//   • CodexProcessOwnerPool — lifecycle pool of owners keyed on connection
+//                           identity (command, CODEX_HOME/env). One process per key.
+//   • CodexThreadClient   — thin single-view shim over an owner (one process, one
+//                           global handler slot) — the historical surface.
+//   • CodexOneShotClient  — thin shim over owner.runOneShot()/listModels().
+//   • ChatThreadController — surface-agnostic chat controller over any
+//                           AgentBackend (a view or a thread client).
 //
 // Plus the normalization layer (Codex v2 notifications → NormalizedThreadEvent)
 // and the chat tool-definition primitives.
+
+export {
+  CodexProcessOwner,
+  CodexBackendView,
+  type CodexProcessOwnerOptions,
+  type CodexOneShotWorkerOptions,
+  type CodexTransportFactory
+} from "./codex-process-owner";
+
+export {
+  CodexProcessOwnerPool,
+  type CodexProcessOwnerFactory,
+  type CodexProcessOwnerPoolOptions
+} from "./codex-process-owner-pool";
 
 export {
   CodexThreadClient,
