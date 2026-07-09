@@ -42,7 +42,7 @@ jobs:
           cache: pnpm
 
       - name: Ensure npm supports trusted publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: Install
         run: pnpm install --frozen-lockfile --ignore-pnpmfile
