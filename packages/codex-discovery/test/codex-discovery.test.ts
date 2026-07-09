@@ -9,6 +9,7 @@ import {
   CODEX_COMMAND_ENV,
   MINIMUM_CODEX_CLI_VERSION,
 } from "../src/index";
+import { getCodexInstallCandidatePaths } from "../src/codex-discovery";
 import { makeTempDir, writeFakeCodex } from "./helpers";
 
 const isWindows = process.platform === "win32";
@@ -41,6 +42,17 @@ describe("compareCodexCliVersions", () => {
 });
 
 describe.skipIf(isWindows)("discoverCodexCommands", () => {
+  it("includes macOS app bundle and Homebrew install candidates", () => {
+    expect(getCodexInstallCandidatePaths("darwin", "/Users/alice")).toEqual([
+      "/Applications/ChatGPT.app/Contents/Resources/codex",
+      "/Applications/Codex.app/Contents/Resources/codex",
+      "/Users/alice/Applications/ChatGPT.app/Contents/Resources/codex",
+      "/Users/alice/Applications/Codex.app/Contents/Resources/codex",
+      "/opt/homebrew/bin/codex",
+      "/usr/local/bin/codex",
+    ]);
+  });
+
   it("returns auto candidates newest-first and honors env > config > auto priority", async () => {
     const envDir = makeTempDir();
     const configDir = makeTempDir();
@@ -94,6 +106,37 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
       expect(snapshot.selectedCommand).toBe(configCmd);
     } finally {
       rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("parses and exposes a selected 0.139.0 version with trailing punctuation", async () => {
+    const dir = makeTempDir();
+    try {
+      const cmd = writeFakeCodex({ dir, version: "0.139.0." });
+      const snapshot = await discoverCodexCommands({
+        env: { PATH: dir },
+        platform: "linux",
+      });
+
+      const selectedCandidate = snapshot.candidates.find(
+        (candidate) => candidate.selected,
+      );
+      expect(snapshot.selectedCommand).toBe(cmd);
+      expect(snapshot.selectedSource).toBe("path");
+      expect(selectedCandidate?.version).toBe("0.139.0");
+
+      const resolved = await resolveCodexCommand({
+        command: "codex",
+        env: { PATH: dir },
+        platform: "linux",
+      });
+      expect(resolved).toMatchObject({
+        command: cmd,
+        source: "path",
+        version: "0.139.0",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
