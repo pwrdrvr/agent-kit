@@ -129,19 +129,25 @@ function validateCodexCliVersion(version: string): string | undefined {
 
 /**
  * Well-known install locations for the Codex CLI, used as auto-candidates
- * alongside the PATH lookup. Platform-aware: macOS gets `Codex.app`
- * resource bundles, Linux gets the standard FHS dirs plus the common
- * user-local Node/Rust/Bun toolchain locations that aren't typically on
- * an Electron-spawned process's PATH. Returned in priority order
- * (system-wide first, user-local second) so the discovery prefers the
- * canonical install when both are present.
+ * alongside the PATH lookup. Platform-aware: macOS gets `ChatGPT.app` and
+ * `Codex.app` resource bundles plus common Homebrew prefixes, Linux gets the
+ * standard FHS dirs plus the common user-local Node/Rust/Bun toolchain
+ * locations that aren't typically on an Electron-spawned process's PATH.
+ * Returned in priority order (system-wide first, user-local second) so the
+ * discovery prefers the canonical install when both are present.
  */
-function getCodexInstallCandidatePaths(platform: NodeJS.Platform): string[] {
-  const homeDir = os.homedir();
+export function getCodexInstallCandidatePaths(
+  platform: NodeJS.Platform,
+  homeDir = os.homedir(),
+): string[] {
   if (platform === "darwin") {
     return [
+      "/Applications/ChatGPT.app/Contents/Resources/codex",
       "/Applications/Codex.app/Contents/Resources/codex",
+      path.join(homeDir, "Applications/ChatGPT.app/Contents/Resources/codex"),
       path.join(homeDir, "Applications/Codex.app/Contents/Resources/codex"),
+      "/opt/homebrew/bin/codex",
+      "/usr/local/bin/codex",
     ];
   }
   if (platform === "linux") {
