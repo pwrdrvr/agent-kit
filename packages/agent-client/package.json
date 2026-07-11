@@ -25,8 +25,8 @@
   "dependencies": {
     "@pwrdrvr/agent-core": "workspace:^",
     "@pwrdrvr/agent-transport": "workspace:^",
+    "@pwrdrvr/codex-app-server-protocol": "^0.135.0",
     "@pwrdrvr/codex-discovery": "workspace:^",
-    "@pwrdrvr/codex-app-server-protocol": "^0.133.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
