@@ -18,6 +18,7 @@
 import { z } from "zod";
 import type {
   DynamicToolCallOutputContentItem,
+  DynamicToolNamespaceTool,
   DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
 
@@ -83,15 +84,30 @@ export function defineTool<TArgs>(spec: ToolSpec<TArgs>): ToolSpec<TArgs> {
 export type AnyToolSpec = ToolSpec<any>;
 
 /**
- * Convert a `ToolSpec` into the protocol `DynamicToolSpec` registered with Codex
- * at `thread/start`. The `inputSchema` is derived from the tool's zod
- * `argsSchema` via zod v4's `z.toJSONSchema()` (JSON Schema draft 2020-12).
+ * Convert a `ToolSpec` into the protocol function-tool shape nested inside a
+ * Codex dynamic-tool namespace. The `inputSchema` is derived from the tool's
+ * zod `argsSchema` via zod v4's `z.toJSONSchema()` (JSON Schema draft 2020-12).
+ */
+export function toDynamicToolNamespaceTool(spec: AnyToolSpec): DynamicToolNamespaceTool {
+  return {
+    type: "function",
+    name: spec.name,
+    description: spec.description,
+    inputSchema: z.toJSONSchema(spec.argsSchema) as DynamicToolNamespaceTool["inputSchema"]
+  };
+}
+
+/**
+ * Convert a `ToolSpec` into a standalone protocol `DynamicToolSpec`. The current
+ * protocol carries namespaces as top-level specs containing function tools, so a
+ * single tool becomes a one-tool namespace. `buildToolCatalog` groups tools that
+ * share a namespace before registration.
  */
 export function toDynamicToolSpec(spec: AnyToolSpec): DynamicToolSpec {
   return {
-    namespace: spec.namespace,
-    name: spec.name,
-    description: spec.description,
-    inputSchema: z.toJSONSchema(spec.argsSchema) as DynamicToolSpec["inputSchema"]
+    type: "namespace",
+    name: spec.namespace,
+    description: `Tools in the ${spec.namespace} namespace.`,
+    tools: [toDynamicToolNamespaceTool(spec)]
   };
 }

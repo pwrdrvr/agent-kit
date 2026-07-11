@@ -332,8 +332,7 @@ export class CodexOneShotClient {
         // dedicated cwd keeps the worker out of any host repo/worktree.
         ...(this.options.threadConfig !== undefined ? { config: this.options.threadConfig } : {}),
         environments: [],
-        experimentalRawEvents: false,
-        persistExtendedHistory: false
+        experimentalRawEvents: false
       },
       this.requestTimeoutMs
     )) as ThreadStartResponse;
