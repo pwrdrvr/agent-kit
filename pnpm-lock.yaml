@@ -7,7 +7,7 @@ settings:
 overrides:
   zod: ^4.0.0
 
-pnpmfileChecksum: sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=
+pnpmfileChecksum: sha256-nSeLKzq5FAIkAHHxqmAwTobjeMQDJ2T2n/c5eU3xkpo=
 
 importers:
 
