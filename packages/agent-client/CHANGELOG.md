@@ -1,5 +1,11 @@
 # @pwrdrvr/agent-client
 
+## 0.6.2
+
+### Patch Changes
+
+- 19423da: Update @pwrdrvr/codex-app-server-protocol to 0.135.0.
+
 ## 0.6.1
 
 ### Patch Changes
