@@ -7,6 +7,8 @@ settings:
 overrides:
   zod: ^4.0.0
 
+pnpmfileChecksum: sha256-nSeLKzq5FAIkAHHxqmAwTobjeMQDJ2T2n/c5eU3xkpo=
+
 importers:
 
   .:
@@ -105,8 +107,8 @@ importers:
         specifier: workspace:^
         version: link:../agent-transport
       '@pwrdrvr/codex-app-server-protocol':
-        specifier: ^0.133.0
-        version: 0.133.0
+        specifier: ^0.135.0
+        version: 0.135.0
       '@pwrdrvr/codex-discovery':
         specifier: workspace:^
         version: link:../codex-discovery
@@ -592,8 +594,8 @@ packages:
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
 
-  '@pwrdrvr/codex-app-server-protocol@0.133.0':
-    resolution: {integrity: sha512-mt+geA0RZEz5A3kEK8poDE3wYDrteWGb2syfXS4/kzzgWEe26DUbQlbdQyFYoa7Zs/Z6L64gNGIfFHgemfzj8g==}
+  '@pwrdrvr/codex-app-server-protocol@0.135.0':
+    resolution: {integrity: sha512-lmebPpbmaE7yfe0EDqcT2MPRtKurUc1o9NinHAVdA3lBdF3c8ZK3okiHIw6r6GEQLqOTd+7dpEuPsk4a1dEpkw==}
     engines: {node: '>=20'}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
@@ -2241,7 +2243,7 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.1
 
-  '@pwrdrvr/codex-app-server-protocol@0.133.0': {}
+  '@pwrdrvr/codex-app-server-protocol@0.135.0': {}
 
   '@rollup/rollup-android-arm-eabi@4.60.4':
     optional: true

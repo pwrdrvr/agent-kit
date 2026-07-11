@@ -22,7 +22,7 @@ jobs:
           cache: pnpm
 
       - name: Install
-        run: pnpm install --frozen-lockfile --ignore-pnpmfile
+        run: pnpm install --frozen-lockfile
 
       - name: License policy
         run: pnpm lint:licenses

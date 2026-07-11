@@ -45,7 +45,7 @@ jobs:
         run: npm install -g npm@11
 
       - name: Install
-        run: pnpm install --frozen-lockfile --ignore-pnpmfile
+        run: pnpm install --frozen-lockfile
 
       - name: Build
         run: pnpm build
