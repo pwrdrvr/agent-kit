@@ -141,6 +141,7 @@ function syntheticSequence(): Array<{ method: string; params: unknown }> {
       effort: "medium" as never,
       summary: null,
       collaborationMode: "off" as never,
+      multiAgentMode: "explicitRequestOnly",
       personality: null
     }
   };

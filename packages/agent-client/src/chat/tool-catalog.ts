@@ -16,17 +16,32 @@ import { z } from "zod";
 import type {
   DynamicToolCallParams,
   DynamicToolCallResponse,
+  DynamicToolNamespaceTool,
   DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
 import type { AnyToolSpec } from "./define-tool";
-import { toDynamicToolSpec } from "./define-tool";
+import { toDynamicToolNamespaceTool } from "./define-tool";
 
 /**
  * Build the `DynamicToolSpec[]` registered with Codex at `thread/start`. Pure
  * projection of the catalog — an empty catalog yields an empty spec list.
  */
 export function buildToolCatalog(catalog: ReadonlyArray<AnyToolSpec>): DynamicToolSpec[] {
-  return catalog.map(toDynamicToolSpec);
+  const namespaces = new Map<string, DynamicToolNamespaceTool[]>();
+  for (const tool of catalog) {
+    const group = namespaces.get(tool.namespace);
+    if (group === undefined) {
+      namespaces.set(tool.namespace, [toDynamicToolNamespaceTool(tool)]);
+    } else {
+      group.push(toDynamicToolNamespaceTool(tool));
+    }
+  }
+  return Array.from(namespaces, ([name, tools]) => ({
+    type: "namespace",
+    name,
+    description: `Tools in the ${name} namespace.`,
+    tools
+  }));
 }
 
 /**

@@ -248,8 +248,7 @@ export class CodexThreadClient implements AgentBackend {
     await this.initialize();
 
     const params: ThreadForkParams = {
-      threadId: opts.sourceThreadId,
-      persistExtendedHistory: false
+      threadId: opts.sourceThreadId
     };
     if (opts.cwd !== undefined) params.cwd = opts.cwd;
     if (opts.workspaceRoots !== undefined) params.runtimeWorkspaceRoots = [...opts.workspaceRoots];
@@ -283,8 +282,7 @@ export class CodexThreadClient implements AgentBackend {
 
     // exactOptionalPropertyTypes: only attach a key when the caller supplied it.
     const params: ThreadStartParams = {
-      experimentalRawEvents: false,
-      persistExtendedHistory: false
+      experimentalRawEvents: false
     };
     if (opts.cwd !== undefined) params.cwd = opts.cwd;
     if (opts.model !== undefined) params.model = opts.model;
@@ -331,8 +329,7 @@ export class CodexThreadClient implements AgentBackend {
     await this.initialize();
 
     const params: ThreadResumeParams = {
-      threadId,
-      persistExtendedHistory: false
+      threadId
     };
     const response = (await connection.request(
       "thread/resume",

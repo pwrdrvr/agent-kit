@@ -16,10 +16,19 @@ const listTool = defineTool({
 describe("defineTool / toDynamicToolSpec", () => {
   it("serializes a tool spec to a valid DynamicToolSpec via z.toJSONSchema", () => {
     const spec = toDynamicToolSpec(listTool as ToolSpec<unknown>);
-    expect(spec.namespace).toBe("host_tools");
-    expect(spec.name).toBe("library_list");
-    expect(spec.description).toBe("List captures in the library.");
-    expect(spec.inputSchema).toMatchObject({
+    expect(spec.type).toBe("namespace");
+    if (spec.type !== "namespace") {
+      throw new Error("expected namespace dynamic tool spec");
+    }
+    expect(spec.name).toBe("host_tools");
+    expect(spec.description).toBe("Tools in the host_tools namespace.");
+    expect(spec.tools).toHaveLength(1);
+    expect(spec.tools[0]).toMatchObject({
+      type: "function",
+      name: "library_list",
+      description: "List captures in the library."
+    });
+    expect(spec.tools[0]?.inputSchema).toMatchObject({
       type: "object",
       properties: {
         limit: { type: "integer", exclusiveMinimum: 0, maximum: 200 }
@@ -27,10 +36,27 @@ describe("defineTool / toDynamicToolSpec", () => {
     });
   });
 
-  it("builds the catalog as a pure projection of the tool list", () => {
-    const catalog = buildToolCatalog([listTool as ToolSpec<unknown>]);
+  it("builds the catalog grouped by namespace", () => {
+    const renderTool = defineTool({
+      namespace: "host_tools",
+      name: "render",
+      description: "Render a capture.",
+      argsSchema: z.object({ id: z.string() }),
+      dispatch: async () => ({ ok: true, data: {} })
+    });
+    const catalog = buildToolCatalog([
+      listTool as ToolSpec<unknown>,
+      renderTool as ToolSpec<unknown>
+    ]);
     expect(catalog).toHaveLength(1);
-    expect(catalog[0]?.name).toBe("library_list");
+    expect(catalog[0]?.name).toBe("host_tools");
+    expect(catalog[0]).toMatchObject({
+      type: "namespace",
+      tools: [
+        { type: "function", name: "library_list" },
+        { type: "function", name: "render" }
+      ]
+    });
     expect(buildToolCatalog([])).toEqual([]);
   });
 });
