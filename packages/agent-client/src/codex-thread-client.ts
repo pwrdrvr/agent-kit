@@ -43,7 +43,11 @@ import type {
   AskForApproval,
   DynamicToolCallResponse,
   DynamicToolSpec,
+  ReviewDelivery,
+  ReviewStartParams,
+  ReviewTarget,
   SandboxMode,
+  ThreadCompactStartParams,
   ThreadForkParams,
   ThreadForkResponse,
   ThreadResumeParams,
@@ -52,6 +56,7 @@ import type {
   ThreadStartResponse,
   TurnStartParams,
   TurnStartResponse,
+  TurnSteerParams,
   UserInput
 } from "@pwrdrvr/codex-app-server-protocol/v2";
 import {
@@ -59,6 +64,11 @@ import {
   CODEX_TOOL_CALL_METHOD,
   normalizeNotification
 } from "./normalize";
+import {
+  extractStringProperty,
+  extractThreadIdFromValue,
+  extractTurnIdFromValue
+} from "./codex-extract";
 
 export type CodexThreadClientTransportFactory = (command: string) => JsonRpcTransport;
 
@@ -393,6 +403,140 @@ export class CodexThreadClient implements AgentBackend {
   async interruptTurn(threadId: string): Promise<void> {
     const connection = await this.getConnection();
     await connection.request("turn/interrupt", { threadId }, this.requestTimeoutMs);
+  }
+
+  /**
+   * Steer the in-flight turn (Codex `turn/steer`): inject new input that the
+   * model folds into the active turn. `expectedTurnId` is the precondition —
+   * Codex rejects the call if it isn't the currently active turn. The steered
+   * turn's output streams through the normal `onEvent` notification path; the
+   * returned `turnId` is the active turn (falls back to `expectedTurnId`).
+   */
+  async steerTurn(opts: {
+    threadId: string;
+    input: UserInput[];
+    expectedTurnId: string;
+  }): Promise<{ threadId: string; turnId: string }> {
+    await this.resumeThread(opts.threadId).catch(() => undefined);
+    const connection = await this.getConnection();
+    const params: TurnSteerParams = {
+      threadId: opts.threadId,
+      input: opts.input,
+      expectedTurnId: opts.expectedTurnId
+    };
+    const result = await connection.request("turn/steer", params, this.requestTimeoutMs);
+    return {
+      threadId: opts.threadId,
+      turnId: extractTurnIdFromValue(result) ?? opts.expectedTurnId
+    };
+  }
+
+  /**
+   * Compact the thread's history into a summary (Codex `thread/compact/start`),
+   * shrinking the context window. Emits a compaction turn whose progress streams
+   * through `onEvent`. Returns the produced turn (synthesizing a stable id when
+   * Codex omits one) and the optional summary item id.
+   */
+  async compactThread(
+    threadId: string
+  ): Promise<{ threadId: string; turnId: string; itemId?: string }> {
+    await this.resumeThread(threadId).catch(() => undefined);
+    const connection = await this.getConnection();
+    const params: ThreadCompactStartParams = { threadId };
+    const result = await connection.request(
+      "thread/compact/start",
+      params,
+      this.requestTimeoutMs
+    );
+    const resolvedThreadId = extractThreadIdFromValue(result) ?? threadId;
+    const turnId = extractTurnIdFromValue(result) ?? `compact:${resolvedThreadId}`;
+    const itemId = extractStringProperty(result, "itemId", "item_id");
+    return itemId !== undefined
+      ? { threadId: resolvedThreadId, turnId, itemId }
+      : { threadId: resolvedThreadId, turnId };
+  }
+
+  /**
+   * Start a code review (Codex `review/start`) over the given target. Inline
+   * delivery runs the review on the current thread; detached delivery spins up a
+   * new review thread (returned as `reviewThreadId`). Review output streams
+   * through `onEvent`.
+   */
+  async startReview(opts: {
+    threadId: string;
+    target: ReviewTarget;
+    delivery?: ReviewDelivery;
+    cwd?: string;
+  }): Promise<{ threadId: string; reviewThreadId: string; turnId: string }> {
+    await this.resumeThread(opts.threadId).catch(() => undefined);
+    const connection = await this.getConnection();
+    const params: ReviewStartParams = {
+      threadId: opts.threadId,
+      target: opts.target,
+      delivery: opts.delivery ?? "inline"
+    };
+    const result = await connection.request("review/start", params, this.requestTimeoutMs);
+    const reviewThreadId =
+      extractStringProperty(result, "reviewThreadId", "review_thread_id") ?? opts.threadId;
+    const turnId = extractTurnIdFromValue(result) ?? `pending:${reviewThreadId}`;
+    return { threadId: opts.threadId, reviewThreadId, turnId };
+  }
+
+  /**
+   * Re-apply per-thread permissions / settings by resuming with an overlay
+   * (Codex `thread/resume`). Used when the host changes model, approval policy,
+   * sandbox, service tier, or reasoning effort mid-thread.
+   */
+  async setThreadPermissions(opts: {
+    threadId: string;
+    cwd?: string;
+    model?: string;
+    approvalPolicy?: string;
+    sandbox?: string;
+    serviceTier?: string;
+    reasoningEffort?: string;
+  }): Promise<{ threadId: string }> {
+    const connection = await this.getConnection();
+    await this.initialize();
+    const params: ThreadResumeParams = {
+      threadId: opts.threadId,
+      persistExtendedHistory: false
+    };
+    if (opts.cwd !== undefined) params.cwd = opts.cwd;
+    if (opts.model !== undefined) params.model = opts.model;
+    if (opts.approvalPolicy !== undefined) {
+      params.approvalPolicy = opts.approvalPolicy as AskForApproval;
+    }
+    if (opts.sandbox !== undefined) params.sandbox = opts.sandbox as SandboxMode;
+    if (opts.serviceTier !== undefined) params.serviceTier = opts.serviceTier;
+    // Reasoning effort is a per-TURN setting in Codex (turn/start `effort`), not a
+    // thread/resume field — matching the in-tree client, resume doesn't carry it.
+    const result = await connection.request("thread/resume", params, this.requestTimeoutMs);
+    this.loadedThreadIds.add(opts.threadId);
+    return { threadId: extractThreadIdFromValue(result) ?? opts.threadId };
+  }
+
+  /**
+   * Mark a project directory trusted in Codex config (`config/value/write`),
+   * so subsequent threads in that directory skip the trust prompt.
+   */
+  async trustProject(opts: {
+    projectPath: string;
+    configPath?: string;
+  }): Promise<{ projectPath: string; configPath?: string }> {
+    const projectPath = opts.projectPath.trim();
+    if (!projectPath) throw new Error("projectPath is required");
+    const connection = await this.getConnection();
+    await this.initialize();
+    const filePath = opts.configPath?.trim();
+    const payload = {
+      keyPath: "projects",
+      value: { [projectPath]: { trust_level: "trusted" } },
+      mergeStrategy: "upsert",
+      ...(filePath ? { filePath } : {})
+    };
+    await connection.request("config/value/write", payload, this.requestTimeoutMs);
+    return filePath ? { projectPath, configPath: filePath } : { projectPath };
   }
 
   async archiveThread(threadId: string): Promise<void> {
