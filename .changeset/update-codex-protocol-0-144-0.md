@@ -1,5 +1,5 @@
 ---
-"@pwrdrvr/agent-client": patch
+"@pwrdrvr/agent-client": minor
 ---
 
 Update `@pwrdrvr/codex-app-server-protocol` to 0.144.0 and emit its new
