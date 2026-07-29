@@ -39,15 +39,15 @@ export type ToolDispatchResult =
  * `argsSchema` (what the agent must satisfy — validated before dispatch), and
  * `dispatch` (the host-injected body it resolves to).
  */
-export type ToolSpec<TArgs> = {
-  /** Namespace this tool lives under; matched against `DynamicToolCallParams.namespace`. */
-  namespace: string;
+type ToolSpecDefinition<TArgs> = {
   /** snake_case agent-facing name, e.g. "library_list". */
   name: string;
   /** Agent-readable, terse. Shown verbatim to Codex. */
   description: string;
   /** zod schema for the tool arguments; also the source of `inputSchema`. */
   argsSchema: z.ZodType<TArgs>;
+  /** Ask Codex to defer loading this function's definition until it is needed. */
+  deferLoading?: boolean;
   /**
    * Behaviour hints surfaced to the agent / approval UI. Optional per tool;
    * omit (rather than set `undefined`) when not applicable —
@@ -66,11 +66,30 @@ export type ToolSpec<TArgs> = {
 };
 
 /**
+ * A namespaced chat tool. The namespace is matched against
+ * `DynamicToolCallParams.namespace`.
+ */
+export type ToolSpec<TArgs> = ToolSpecDefinition<TArgs> & {
+  namespace: string;
+};
+
+/** A top-level function tool that does not belong to a namespace. */
+export type UnnamespacedToolSpec<TArgs> = ToolSpecDefinition<TArgs> & {
+  namespace?: never;
+};
+
+/**
  * Identity helper that preserves `TArgs` inference at each call site, so a
  * tool's `dispatch` body is fully type-checked against its own `argsSchema`
  * without any cast.
  */
-export function defineTool<TArgs>(spec: ToolSpec<TArgs>): ToolSpec<TArgs> {
+export function defineTool<TArgs>(spec: ToolSpec<TArgs>): ToolSpec<TArgs>;
+export function defineTool<TArgs>(
+  spec: UnnamespacedToolSpec<TArgs>
+): UnnamespacedToolSpec<TArgs>;
+export function defineTool<TArgs>(
+  spec: ToolSpec<TArgs> | UnnamespacedToolSpec<TArgs>
+): ToolSpec<TArgs> | UnnamespacedToolSpec<TArgs> {
   return spec;
 }
 
@@ -81,33 +100,41 @@ export function defineTool<TArgs>(spec: ToolSpec<TArgs>): ToolSpec<TArgs> {
  * `dispatchToolCall`. Args are validated at runtime, so the erasure is safe.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type AnyToolSpec = ToolSpec<any>;
+export type AnyToolSpec = ToolSpec<any> | UnnamespacedToolSpec<any>;
 
 /**
- * Convert a `ToolSpec` into the protocol function-tool shape nested inside a
- * Codex dynamic-tool namespace. The `inputSchema` is derived from the tool's
- * zod `argsSchema` via zod v4's `z.toJSONSchema()` (JSON Schema draft 2020-12).
+ * Convert a `ToolSpec` into the protocol's discriminated function-tool shape.
+ * The same shape is valid both as a top-level `DynamicToolSpec` and inside a
+ * namespace. The `inputSchema` is derived from the tool's zod `argsSchema` via
+ * zod v4's `z.toJSONSchema()` (JSON Schema draft 2020-12).
  */
-export function toDynamicToolNamespaceTool(spec: AnyToolSpec): DynamicToolNamespaceTool {
+export function toDynamicToolFunctionSpec(spec: AnyToolSpec): DynamicToolNamespaceTool {
   return {
     type: "function",
     name: spec.name,
     description: spec.description,
-    inputSchema: z.toJSONSchema(spec.argsSchema) as DynamicToolNamespaceTool["inputSchema"]
+    inputSchema: z.toJSONSchema(spec.argsSchema) as DynamicToolNamespaceTool["inputSchema"],
+    ...(spec.deferLoading === undefined ? {} : { deferLoading: spec.deferLoading })
   };
 }
 
 /**
- * Convert a `ToolSpec` into a standalone protocol `DynamicToolSpec`. The current
- * protocol carries namespaces as top-level specs containing function tools, so a
- * single tool becomes a one-tool namespace. `buildToolCatalog` groups tools that
- * share a namespace before registration.
+ * Convert one `ToolSpec` into a valid standalone protocol `DynamicToolSpec`.
+ *
+ * @deprecated Use `toDynamicToolFunctionSpec` when a flat function shape is
+ * needed, or `buildToolCatalog` when registering a catalog with Codex. A
+ * one-tool conversion cannot group multiple tools that share a namespace.
  */
 export function toDynamicToolSpec(spec: AnyToolSpec): DynamicToolSpec {
+  const functionSpec = toDynamicToolFunctionSpec(spec);
+  if (spec.namespace === undefined) {
+    return functionSpec;
+  }
+
   return {
     type: "namespace",
     name: spec.namespace,
     description: `Tools in the ${spec.namespace} namespace.`,
-    tools: [toDynamicToolNamespaceTool(spec)]
+    tools: [functionSpec]
   };
 }

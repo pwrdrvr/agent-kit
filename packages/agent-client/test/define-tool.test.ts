@@ -1,42 +1,68 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
 import type { DynamicToolCallParams } from "@pwrdrvr/codex-app-server-protocol/v2";
-import { defineTool, toDynamicToolSpec, type ToolSpec } from "../src/chat/define-tool";
+import {
+  defineTool,
+  toDynamicToolFunctionSpec,
+  toDynamicToolSpec,
+  type AnyToolSpec,
+  type ToolSpec
+} from "../src/chat/define-tool";
 import { buildToolCatalog, dispatchToolCall } from "../src/chat/tool-catalog";
+
+const emptyInputSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: {},
+  additionalProperties: false
+};
+
+const listInputSchema = {
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: {
+    limit: { type: "integer", exclusiveMinimum: 0, maximum: 200 }
+  },
+  additionalProperties: false
+};
 
 const listTool = defineTool({
   namespace: "host_tools",
   name: "library_list",
   description: "List captures in the library.",
   argsSchema: z.object({ limit: z.number().int().positive().max(200).optional() }),
+  deferLoading: true,
   annotations: { readOnlyHint: true, idempotentHint: true },
   dispatch: async (args) => ({ ok: true, data: { count: args.limit ?? 0 } })
 });
 
 describe("defineTool / toDynamicToolSpec", () => {
-  it("serializes a tool spec to a valid DynamicToolSpec via z.toJSONSchema", () => {
-    const spec = toDynamicToolSpec(listTool as ToolSpec<unknown>);
-    expect(spec.type).toBe("namespace");
-    if (spec.type !== "namespace") {
-      throw new Error("expected namespace dynamic tool spec");
-    }
-    expect(spec.name).toBe("host_tools");
-    expect(spec.description).toBe("Tools in the host_tools namespace.");
-    expect(spec.tools).toHaveLength(1);
-    expect(spec.tools[0]).toMatchObject({
-      type: "function",
-      name: "library_list",
-      description: "List captures in the library."
+  it("converts an unnamespaced tool to the exact top-level function wire shape", () => {
+    const pingTool = defineTool({
+      name: "ping",
+      description: "Check whether the host is available.",
+      argsSchema: z.object({}),
+      deferLoading: false,
+      dispatch: async () => ({ ok: true, data: "pong" })
     });
-    expect(spec.tools[0]?.inputSchema).toMatchObject({
-      type: "object",
-      properties: {
-        limit: { type: "integer", exclusiveMinimum: 0, maximum: 200 }
-      }
+
+    expect(toDynamicToolFunctionSpec(pingTool)).toEqual({
+      type: "function",
+      name: "ping",
+      description: "Check whether the host is available.",
+      inputSchema: emptyInputSchema,
+      deferLoading: false
+    });
+    expect(toDynamicToolSpec(pingTool)).toEqual({
+      type: "function",
+      name: "ping",
+      description: "Check whether the host is available.",
+      inputSchema: emptyInputSchema,
+      deferLoading: false
     });
   });
 
-  it("builds the catalog grouped by namespace", () => {
+  it("builds one exact namespace object and preserves schemas and deferLoading", () => {
     const renderTool = defineTool({
       namespace: "host_tools",
       name: "render",
@@ -44,20 +70,115 @@ describe("defineTool / toDynamicToolSpec", () => {
       argsSchema: z.object({ id: z.string() }),
       dispatch: async () => ({ ok: true, data: {} })
     });
-    const catalog = buildToolCatalog([
-      listTool as ToolSpec<unknown>,
-      renderTool as ToolSpec<unknown>
+
+    expect(buildToolCatalog([listTool, renderTool])).toEqual([
+      {
+        type: "namespace",
+        name: "host_tools",
+        description: "Tools in the host_tools namespace.",
+        tools: [
+          {
+            type: "function",
+            name: "library_list",
+            description: "List captures in the library.",
+            inputSchema: listInputSchema,
+            deferLoading: true
+          },
+          {
+            type: "function",
+            name: "render",
+            description: "Render a capture.",
+            inputSchema: {
+              $schema: "https://json-schema.org/draft/2020-12/schema",
+              type: "object",
+              properties: { id: { type: "string" } },
+              required: ["id"],
+              additionalProperties: false
+            }
+          }
+        ]
+      }
     ]);
-    expect(catalog).toHaveLength(1);
-    expect(catalog[0]?.name).toBe("host_tools");
-    expect(catalog[0]).toMatchObject({
+    expect(buildToolCatalog([])).toEqual([]);
+  });
+
+  it("emits unnamespaced functions and groups mixed namespaces exactly once", () => {
+    const tool = (namespace: string | undefined, name: string): AnyToolSpec => {
+      const definition = {
+        name,
+        description: `Run ${name}.`,
+        argsSchema: z.object({}),
+        dispatch: async () => ({ ok: true as const, data: {} })
+      };
+      return namespace === undefined
+        ? defineTool(definition)
+        : defineTool({ ...definition, namespace });
+    };
+
+    expect(
+      buildToolCatalog([
+        tool("pwrsnap_library", "library_list"),
+        tool(undefined, "health_check"),
+        tool("pwrsnap_sizzle", "sizzle_render"),
+        tool("pwrsnap_library", "library_open")
+      ])
+    ).toEqual([
+      {
+        type: "function",
+        name: "health_check",
+        description: "Run health_check.",
+        inputSchema: emptyInputSchema
+      },
+      {
+        type: "namespace",
+        name: "pwrsnap_library",
+        description: "Tools in the pwrsnap_library namespace.",
+        tools: [
+          {
+            type: "function",
+            name: "library_list",
+            description: "Run library_list.",
+            inputSchema: emptyInputSchema
+          },
+          {
+            type: "function",
+            name: "library_open",
+            description: "Run library_open.",
+            inputSchema: emptyInputSchema
+          }
+        ]
+      },
+      {
+        type: "namespace",
+        name: "pwrsnap_sizzle",
+        description: "Tools in the pwrsnap_sizzle namespace.",
+        tools: [
+          {
+            type: "function",
+            name: "sizzle_render",
+            description: "Run sizzle_render.",
+            inputSchema: emptyInputSchema
+          }
+        ]
+      }
+    ]);
+  });
+
+  it("keeps toDynamicToolSpec runtime-compatible for one namespaced tool", () => {
+    expect(toDynamicToolSpec(listTool)).toEqual({
       type: "namespace",
+      name: "host_tools",
+      description: "Tools in the host_tools namespace.",
       tools: [
-        { type: "function", name: "library_list" },
-        { type: "function", name: "render" }
+        {
+          type: "function",
+          name: "library_list",
+          description: "List captures in the library.",
+          inputSchema: listInputSchema,
+          deferLoading: true
+        }
       ]
     });
-    expect(buildToolCatalog([])).toEqual([]);
   });
 });
 

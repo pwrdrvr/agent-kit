@@ -1,8 +1,16 @@
 import { describe, it, expect } from "vitest";
 import type { JsonRpcTransport } from "@pwrdrvr/agent-transport";
 import type { NormalizedThreadEvent } from "@pwrdrvr/agent-core";
+import type { DynamicToolSpec } from "@pwrdrvr/codex-app-server-protocol/v2";
 import { CodexThreadClient } from "../src/codex-thread-client";
 import { CODEX_NOTIFICATION_METHODS } from "../src/normalize";
+
+const echoDynamicTool = {
+  type: "function",
+  name: "echo",
+  description: "Echo input.",
+  inputSchema: { type: "object" }
+} satisfies DynamicToolSpec;
 
 /**
  * In-memory JsonRpcTransport. Auto-answers requests it recognizes (initialize,
@@ -208,7 +216,7 @@ describe("CodexThreadClient", () => {
       serviceName: "demo",
       config: { foo: "bar" },
       environments: [],
-      tools: [{ name: "echo" }]
+      tools: [echoDynamicTool]
     });
 
     const startParams = fake.sent.find((e) => e.method === "thread/start")?.params as Record<
@@ -228,7 +236,7 @@ describe("CodexThreadClient", () => {
     expect(startParams.serviceName).toBe("demo");
     expect(startParams.config).toEqual({ foo: "bar" });
     expect(startParams.environments).toEqual([]);
-    expect(startParams.dynamicTools).toEqual([{ name: "echo" }]);
+    expect(startParams.dynamicTools).toEqual([echoDynamicTool]);
 
     await client.startTurn({
       threadId: "thread-1",

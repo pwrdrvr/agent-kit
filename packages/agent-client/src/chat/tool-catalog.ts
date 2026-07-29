@@ -20,28 +20,38 @@ import type {
   DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
 import type { AnyToolSpec } from "./define-tool";
-import { toDynamicToolNamespaceTool } from "./define-tool";
+import { toDynamicToolFunctionSpec } from "./define-tool";
 
 /**
  * Build the `DynamicToolSpec[]` registered with Codex at `thread/start`. Pure
  * projection of the catalog — an empty catalog yields an empty spec list.
  */
 export function buildToolCatalog(catalog: ReadonlyArray<AnyToolSpec>): DynamicToolSpec[] {
+  const functions: DynamicToolSpec[] = [];
   const namespaces = new Map<string, DynamicToolNamespaceTool[]>();
+
   for (const tool of catalog) {
+    const functionSpec = toDynamicToolFunctionSpec(tool);
+    if (tool.namespace === undefined) {
+      functions.push(functionSpec);
+      continue;
+    }
+
     const group = namespaces.get(tool.namespace);
     if (group === undefined) {
-      namespaces.set(tool.namespace, [toDynamicToolNamespaceTool(tool)]);
+      namespaces.set(tool.namespace, [functionSpec]);
     } else {
-      group.push(toDynamicToolNamespaceTool(tool));
+      group.push(functionSpec);
     }
   }
-  return Array.from(namespaces, ([name, tools]) => ({
+
+  const namespaceSpecs: DynamicToolSpec[] = Array.from(namespaces, ([name, tools]) => ({
     type: "namespace",
     name,
     description: `Tools in the ${name} namespace.`,
     tools
   }));
+  return [...functions, ...namespaceSpecs];
 }
 
 /**

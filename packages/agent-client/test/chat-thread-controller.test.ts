@@ -15,7 +15,8 @@ import type {
 } from "@pwrdrvr/agent-core";
 import type {
   DynamicToolCallParams,
-  DynamicToolCallResponse
+  DynamicToolCallResponse,
+  DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
 import {
   ChatThreadController,
@@ -24,6 +25,13 @@ import {
 } from "../src/chat/chat-thread-controller";
 import { defineTool, type ToolSpec } from "../src/chat/define-tool";
 import { buildToolCatalog, dispatchToolCall } from "../src/chat/tool-catalog";
+
+const echoDynamicTool = {
+  type: "function",
+  name: "echo",
+  description: "Echo input.",
+  inputSchema: { type: "object" }
+} satisfies DynamicToolSpec;
 
 /** A fake AgentBackend: captures handlers, lets tests push events + drive the
  *  tool/approval ServerRequest paths, and mints deterministic thread/turn ids. */
@@ -669,7 +677,7 @@ describe("ChatThreadController", () => {
 
   it("passes NEUTRAL start/turn options the controller builds (no Codex/ACP shape)", async () => {
     const { controller, client } = makeController({
-      catalog: [{ name: "echo" } as never],
+      catalog: [echoDynamicTool],
       approvalPolicy: "never",
       sandbox: "read-only",
       serviceName: "svc",
@@ -697,7 +705,7 @@ describe("ChatThreadController", () => {
       modelProvider: "p1",
       config: { foo: "bar" },
       environments: [],
-      tools: [{ name: "echo" }]
+      tools: [echoDynamicTool]
     });
     expect("baseInstructions" in startArg).toBe(false);
     expect("dynamicTools" in startArg).toBe(false);
@@ -725,7 +733,7 @@ describe("ChatThreadController", () => {
         readSettings: async () => ({}),
         broadcast: () => undefined,
         buildSystemPrompt: () => "SYS",
-        catalog: [{ name: "echo" } as never],
+        catalog: [echoDynamicTool],
         approvalPolicy: "never",
         model: "m1",
         effort: "high"
@@ -750,7 +758,7 @@ describe("ChatThreadController", () => {
       instructions: "SYS",
       approvalPolicy: "never",
       model: "m1",
-      tools: [{ name: "echo" }]
+      tools: [echoDynamicTool]
     });
     // Both backends received the identical neutral turn options.
     expect(codexLike.startTurnOpts).toEqual({
