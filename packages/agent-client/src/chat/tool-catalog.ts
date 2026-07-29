@@ -63,15 +63,18 @@ export async function dispatchToolCall(
   params: DynamicToolCallParams,
   catalog: ReadonlyArray<AnyToolSpec>
 ): Promise<DynamicToolCallResponse> {
-  const entry = catalog.find((tool) => tool.name === params.tool);
+  const namespace = params.namespace ?? undefined;
+  const entry = catalog.find(
+    (tool) => tool.name === params.tool && tool.namespace === namespace
+  );
   if (entry === undefined) {
-    return errorResponse(`Unknown tool: ${params.tool}`);
-  }
-
-  // `namespace` is `string | null` on the wire. Accept a missing/null namespace
-  // (Codex may omit it) but reject an explicit mismatch.
-  if (params.namespace !== null && params.namespace !== entry.namespace) {
-    return errorResponse(`Tool "${params.tool}" is not in namespace "${params.namespace}".`);
+    if (!catalog.some((tool) => tool.name === params.tool)) {
+      return errorResponse(`Unknown tool: ${params.tool}`);
+    }
+    if (namespace === undefined) {
+      return errorResponse(`Tool "${params.tool}" is not a top-level tool.`);
+    }
+    return errorResponse(`Tool "${params.tool}" is not in namespace "${namespace}".`);
   }
 
   const parsed = entry.argsSchema.safeParse(params.arguments);

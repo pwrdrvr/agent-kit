@@ -46,8 +46,6 @@ type ToolSpecDefinition<TArgs> = {
   description: string;
   /** zod schema for the tool arguments; also the source of `inputSchema`. */
   argsSchema: z.ZodType<TArgs>;
-  /** Ask Codex to defer loading this function's definition until it is needed. */
-  deferLoading?: boolean;
   /**
    * Behaviour hints surfaced to the agent / approval UI. Optional per tool;
    * omit (rather than set `undefined`) when not applicable —
@@ -71,11 +69,17 @@ type ToolSpecDefinition<TArgs> = {
  */
 export type ToolSpec<TArgs> = ToolSpecDefinition<TArgs> & {
   namespace: string;
+  /** Ask Codex to defer loading this function's definition until it is needed. */
+  deferLoading?: boolean;
 };
 
-/** A top-level function tool that does not belong to a namespace. */
+/**
+ * A top-level function tool that does not belong to a namespace. Codex only
+ * permits deferred loading for tools inside a namespace.
+ */
 export type UnnamespacedToolSpec<TArgs> = ToolSpecDefinition<TArgs> & {
   namespace?: never;
+  deferLoading?: false;
 };
 
 /**
@@ -102,6 +106,15 @@ export function defineTool<TArgs>(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type AnyToolSpec = ToolSpec<any> | UnnamespacedToolSpec<any>;
 
+function assertValidDeferredLoading(spec: AnyToolSpec): void {
+  // The public union makes this state unrepresentable in TypeScript. Widen the
+  // two fields only for the runtime check that protects JavaScript and casts.
+  const candidate: { namespace?: unknown; deferLoading?: unknown } = spec;
+  if (candidate.namespace === undefined && candidate.deferLoading === true) {
+    throw new TypeError("Deferred dynamic tools must belong to a namespace.");
+  }
+}
+
 /**
  * Convert a `ToolSpec` into the protocol's discriminated function-tool shape.
  * The same shape is valid both as a top-level `DynamicToolSpec` and inside a
@@ -109,6 +122,8 @@ export type AnyToolSpec = ToolSpec<any> | UnnamespacedToolSpec<any>;
  * zod v4's `z.toJSONSchema()` (JSON Schema draft 2020-12).
  */
 export function toDynamicToolFunctionSpec(spec: AnyToolSpec): DynamicToolNamespaceTool {
+  assertValidDeferredLoading(spec);
+
   return {
     type: "function",
     name: spec.name,

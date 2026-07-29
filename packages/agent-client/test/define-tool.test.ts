@@ -6,7 +6,8 @@ import {
   toDynamicToolFunctionSpec,
   toDynamicToolSpec,
   type AnyToolSpec,
-  type ToolSpec
+  type ToolSpec,
+  type UnnamespacedToolSpec
 } from "../src/chat/define-tool";
 import { buildToolCatalog, dispatchToolCall } from "../src/chat/tool-catalog";
 
@@ -36,6 +37,16 @@ const listTool = defineTool({
   dispatch: async (args) => ({ ok: true, data: { count: args.limit ?? 0 } })
 });
 
+const typeCheckDeferredTopLevelTool: UnnamespacedToolSpec<unknown> = {
+  name: "invalid_deferred_top_level",
+  description: "Compile-time invalid fixture.",
+  argsSchema: z.object({}),
+  // @ts-expect-error Codex requires deferred dynamic tools to have a namespace.
+  deferLoading: true,
+  dispatch: async () => ({ ok: true, data: null })
+};
+void typeCheckDeferredTopLevelTool;
+
 describe("defineTool / toDynamicToolSpec", () => {
   it("converts an unnamespaced tool to the exact top-level function wire shape", () => {
     const pingTool = defineTool({
@@ -60,6 +71,23 @@ describe("defineTool / toDynamicToolSpec", () => {
       inputSchema: emptyInputSchema,
       deferLoading: false
     });
+  });
+
+  it("rejects deferred loading for an unnamespaced tool at runtime", () => {
+    const invalidTool = {
+      name: "deferred_ping",
+      description: "Invalid deferred top-level tool.",
+      argsSchema: z.object({}),
+      deferLoading: true,
+      dispatch: async () => ({ ok: true as const, data: "pong" })
+    } as unknown as AnyToolSpec;
+
+    expect(() => toDynamicToolFunctionSpec(invalidTool)).toThrow(
+      "Deferred dynamic tools must belong to a namespace."
+    );
+    expect(() => buildToolCatalog([invalidTool])).toThrow(
+      "Deferred dynamic tools must belong to a namespace."
+    );
   });
 
   it("builds one exact namespace object and preserves schemas and deferLoading", () => {
@@ -216,6 +244,42 @@ describe("dispatchToolCall", () => {
     expect(res.contentItems[0]).toEqual({ type: "inputText", text: JSON.stringify({ count: 5 }) });
   });
 
+  it("routes colliding top-level and namespaced names by namespace", async () => {
+    const seen: string[] = [];
+    const namespaced = defineTool({
+      namespace: "host_tools",
+      name: "shared_name",
+      description: "Namespaced handler.",
+      argsSchema: z.object({}),
+      dispatch: async () => {
+        seen.push("namespaced");
+        return { ok: true, data: "namespaced" };
+      }
+    });
+    const topLevel = defineTool({
+      name: "shared_name",
+      description: "Top-level handler.",
+      argsSchema: z.object({}),
+      dispatch: async () => {
+        seen.push("top-level");
+        return { ok: true, data: "top-level" };
+      }
+    });
+
+    const topLevelResponse = await dispatchToolCall(
+      call({ namespace: null, tool: "shared_name" }),
+      [namespaced, topLevel]
+    );
+    const namespacedResponse = await dispatchToolCall(
+      call({ namespace: "host_tools", tool: "shared_name" }),
+      [topLevel, namespaced]
+    );
+
+    expect(topLevelResponse.success).toBe(true);
+    expect(namespacedResponse.success).toBe(true);
+    expect(seen).toEqual(["top-level", "namespaced"]);
+  });
+
   it("rejects an unknown tool without throwing", async () => {
     const res = await dispatchToolCall(call({ tool: "nope" }), [listTool as ToolSpec<unknown>]);
     expect(res.success).toBe(false);
@@ -229,6 +293,15 @@ describe("dispatchToolCall", () => {
     );
     expect(res.success).toBe(false);
     expect((res.contentItems[0] as { text: string }).text).toContain("not in namespace");
+  });
+
+  it("does not treat a namespaced tool as top-level when namespace is null", async () => {
+    const res = await dispatchToolCall(
+      call({ namespace: null }),
+      [listTool as ToolSpec<unknown>]
+    );
+    expect(res.success).toBe(false);
+    expect((res.contentItems[0] as { text: string }).text).toContain("not a top-level tool");
   });
 
   it("rejects invalid arguments with a zod-derived message", async () => {
