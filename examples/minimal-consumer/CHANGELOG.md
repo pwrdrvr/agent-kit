@@ -1,5 +1,12 @@
 # minimal-consumer
 
+## 0.0.7
+
+### Patch Changes
+
+- Updated dependencies [2831451]
+  - @pwrdrvr/agent-client@0.7.0
+
 ## 0.0.6
 
 ### Patch Changes
