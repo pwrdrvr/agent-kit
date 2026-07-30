@@ -21,6 +21,45 @@ The Codex protocol types live in a separate repo,
 [`@pwrdrvr/codex-app-server-protocol`](https://github.com/pwrdrvr/codex-app-server-protocol),
 consumed as a normal versioned dependency.
 
+## Codex dynamic tools
+
+Codex App Server protocol 0.144.0 represents dynamic tools as a discriminated
+union. Use `buildToolCatalog()` for the `dynamicTools`/`tools` value sent when a
+thread starts; it emits unnamespaced tools as top-level `{ type: "function" }`
+objects and groups tools with the same `ToolSpec.namespace` into one
+`{ type: "namespace", tools: [...] }` object.
+
+```ts
+import {
+  buildToolCatalog,
+  defineTool,
+  toDynamicToolFunctionSpec
+} from "@pwrdrvr/agent-client";
+
+const tools = [
+  defineTool({
+    namespace: "capture_library",
+    name: "list",
+    description: "List captures.",
+    argsSchema,
+    deferLoading: true,
+    dispatch
+  })
+];
+
+const codexDynamicTools = buildToolCatalog(tools);
+
+// Flat consumers such as an MCP bridge can retain the owner separately.
+const mcpTools = tools.map((tool) => ({
+  namespace: tool.namespace,
+  ...toDynamicToolFunctionSpec(tool)
+}));
+```
+
+Do not build the Codex catalog with `tools.map(toDynamicToolSpec)`: that
+compatibility helper can only produce a one-tool namespace at a time and cannot
+group a namespaced catalog.
+
 The design and sequencing live in
 [docs/plans](docs/plans/2026-06-02-001-feat-agent-kit-monorepo-buildout-plan.md).
 

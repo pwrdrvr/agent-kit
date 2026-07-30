@@ -20,28 +20,38 @@ import type {
   DynamicToolSpec
 } from "@pwrdrvr/codex-app-server-protocol/v2";
 import type { AnyToolSpec } from "./define-tool";
-import { toDynamicToolNamespaceTool } from "./define-tool";
+import { toDynamicToolFunctionSpec } from "./define-tool";
 
 /**
  * Build the `DynamicToolSpec[]` registered with Codex at `thread/start`. Pure
  * projection of the catalog — an empty catalog yields an empty spec list.
  */
 export function buildToolCatalog(catalog: ReadonlyArray<AnyToolSpec>): DynamicToolSpec[] {
+  const functions: DynamicToolSpec[] = [];
   const namespaces = new Map<string, DynamicToolNamespaceTool[]>();
+
   for (const tool of catalog) {
+    const functionSpec = toDynamicToolFunctionSpec(tool);
+    if (tool.namespace === undefined) {
+      functions.push(functionSpec);
+      continue;
+    }
+
     const group = namespaces.get(tool.namespace);
     if (group === undefined) {
-      namespaces.set(tool.namespace, [toDynamicToolNamespaceTool(tool)]);
+      namespaces.set(tool.namespace, [functionSpec]);
     } else {
-      group.push(toDynamicToolNamespaceTool(tool));
+      group.push(functionSpec);
     }
   }
-  return Array.from(namespaces, ([name, tools]) => ({
+
+  const namespaceSpecs: DynamicToolSpec[] = Array.from(namespaces, ([name, tools]) => ({
     type: "namespace",
     name,
     description: `Tools in the ${name} namespace.`,
     tools
   }));
+  return [...functions, ...namespaceSpecs];
 }
 
 /**
@@ -53,15 +63,18 @@ export async function dispatchToolCall(
   params: DynamicToolCallParams,
   catalog: ReadonlyArray<AnyToolSpec>
 ): Promise<DynamicToolCallResponse> {
-  const entry = catalog.find((tool) => tool.name === params.tool);
+  const namespace = params.namespace ?? undefined;
+  const entry = catalog.find(
+    (tool) => tool.name === params.tool && tool.namespace === namespace
+  );
   if (entry === undefined) {
-    return errorResponse(`Unknown tool: ${params.tool}`);
-  }
-
-  // `namespace` is `string | null` on the wire. Accept a missing/null namespace
-  // (Codex may omit it) but reject an explicit mismatch.
-  if (params.namespace !== null && params.namespace !== entry.namespace) {
-    return errorResponse(`Tool "${params.tool}" is not in namespace "${params.namespace}".`);
+    if (!catalog.some((tool) => tool.name === params.tool)) {
+      return errorResponse(`Unknown tool: ${params.tool}`);
+    }
+    if (namespace === undefined) {
+      return errorResponse(`Tool "${params.tool}" is not a top-level tool.`);
+    }
+    return errorResponse(`Tool "${params.tool}" is not in namespace "${namespace}".`);
   }
 
   const parsed = entry.argsSchema.safeParse(params.arguments);

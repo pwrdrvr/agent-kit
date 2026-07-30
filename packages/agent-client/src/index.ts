@@ -48,8 +48,10 @@ export {
 
 export {
   defineTool,
+  toDynamicToolFunctionSpec,
   toDynamicToolSpec,
   type ToolSpec,
+  type UnnamespacedToolSpec,
   type AnyToolSpec,
   type ToolDispatchResult
 } from "./chat/define-tool";
