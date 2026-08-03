@@ -42,7 +42,9 @@ import {
   type AcpApplyContext
 } from "./normalizer/acp-normalizer";
 import {
+  acpRuntimeSupportsHttpMcp,
   acpRuntimeSupportsSessionLoad,
+  acpRuntimeSupportsSseMcp,
   acpSessionRuntimeStateFromCapabilities,
   acpSessionRuntimeStateFromUpdate,
   mergeAcpRuntimeState,
@@ -54,6 +56,11 @@ import {
   type AcpSessionRuntimeState
 } from "./normalizer/runtime-capabilities";
 import type { AcpJsonRpcTransport } from "./acp-transport";
+import {
+  normalizeAcpMcpServerConfigs,
+  redactAcpMcpCredentials,
+  type AcpMcpServerConfig
+} from "./mcp-server-config";
 
 const ACP_PROTOCOL_VERSION = 1;
 const ACP_PROMPT_REQUEST_TIMEOUT_MS = 60 * 60_000;
@@ -62,13 +69,6 @@ const ACP_REQUEST_TIMEOUT_MS = 30_000;
 export type AcpPromptContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; mimeType: string; data: string };
-
-export type AcpMcpServerConfig = {
-  name: string;
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-};
 
 export type AcpRuntimeOptionSource = "mode" | "model" | "configOption";
 
@@ -84,7 +84,7 @@ export type AcpAgentClientOptions = {
   /** Default cwd for `session/new` when `startThread` omits one. */
   cwd?: string;
   /** MCP servers to attach at `session/new` / `session/load`. */
-  mcpServers?: AcpMcpServerConfig[];
+  mcpServers?: readonly AcpMcpServerConfig[];
   now?: () => number;
   logger?: Logger;
 };
@@ -97,7 +97,16 @@ export type AcpAgentClientOptions = {
 export type AcpStartThreadOptions = {
   /** Working directory for the agent session. */
   cwd?: string;
-  mcpServers?: AcpMcpServerConfig[];
+  mcpServers?: readonly AcpMcpServerConfig[];
+};
+
+/** ACP-native `session/load` options. The protocol session id is the id the
+ * agent persisted; `threadId` optionally preserves a separate host-facing id. */
+export type AcpLoadThreadOptions = {
+  sessionId: string;
+  threadId?: string;
+  cwd?: string;
+  mcpServers?: readonly AcpMcpServerConfig[];
 };
 
 /** ACP-NATIVE turn/start options. Internal mapping target; the public `startTurn`
@@ -143,8 +152,7 @@ type AcpSessionState = {
   pendingInstructions: string | undefined;
   /** Names of the MCP servers attached to THIS session (per-thread, since one
    *  shared client can serve surfaces with different tool sets). Used to
-   *  auto-approve this session's MCP tools even when the client carries no
-   *  client-level `mcpServers` default. */
+   *  give the host's approval policy session-isolated MCP context. */
   mcpServerNames: string[];
 };
 
@@ -199,7 +207,7 @@ export class AcpAgentClient implements AgentBackend {
   private readonly clientTitle: string;
   private readonly clientVersion: string;
   private readonly defaultCwd: string | undefined;
-  private readonly defaultMcpServers: AcpMcpServerConfig[];
+  private readonly defaultMcpServers: readonly AcpMcpServerConfig[];
 
   // ---- subscriptions (mirror CodexThreadClient) ----
 
@@ -322,6 +330,21 @@ export class AcpAgentClient implements AgentBackend {
     });
   }
 
+  /** ACP-native `session/load`. The pinned ACP v1 library has no separate
+   *  `session/resume` method; loading is the protocol-defined history restore
+   *  path and receives the same per-thread MCP configuration as `session/new`. */
+  async loadThreadNative(
+    options: AcpLoadThreadOptions
+  ): Promise<AgentBackendStartThreadResult> {
+    return this.openSession({
+      lifecycle: "load",
+      protocolSessionId: options.sessionId,
+      ...(options.threadId !== undefined ? { bindThreadId: options.threadId } : {}),
+      ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+      ...(options.mcpServers !== undefined ? { mcpServers: options.mcpServers } : {})
+    });
+  }
+
   /**
    * Re-establish a fresh ACP session for a PERSISTED thread id whose underlying
    * session is gone (e.g. resuming a chat after an app restart — the agent
@@ -341,7 +364,7 @@ export class AcpAgentClient implements AgentBackend {
      *  surfaces with different tool sets (library vs sizzle): each surface
      *  passes its own servers, so its threads spawn its tools — overriding the
      *  client-level default. */
-    mcpServers?: AcpMcpServerConfig[];
+    mcpServers?: readonly AcpMcpServerConfig[];
   }): Promise<void> {
     if (this.sessions.has(options.threadId)) return;
     const instructions = options.buildInstructions?.();
@@ -383,11 +406,28 @@ export class AcpAgentClient implements AgentBackend {
    *  bound to that existing host thread id. */
   private async establishSession(options: {
     cwd?: string;
-    mcpServers?: AcpMcpServerConfig[];
+    mcpServers?: readonly AcpMcpServerConfig[];
+    bindThreadId?: string;
+    instructions?: string;
+  }): Promise<AgentBackendStartThreadResult> {
+    return this.openSession({ lifecycle: "new", ...options });
+  }
+
+  private async openSession(options: {
+    lifecycle: "new" | "load";
+    protocolSessionId?: string;
+    cwd?: string;
+    mcpServers?: readonly AcpMcpServerConfig[];
     bindThreadId?: string;
     instructions?: string;
   }): Promise<AgentBackendStartThreadResult> {
     await this.initialize();
+    if (
+      options.lifecycle === "load" &&
+      !acpRuntimeSupportsSessionLoad(this.runtimeCapabilities)
+    ) {
+      throw new Error("ACP agent does not advertise session/load support");
+    }
     const cwd = options.cwd ?? this.defaultCwd ?? process.cwd();
     // Ensure the session workspace exists. ACP agents use `cwd` as their
     // working directory; some (e.g. Gemini) fail `session/new` with an opaque
@@ -401,25 +441,33 @@ export class AcpAgentClient implements AgentBackend {
         message: cause instanceof Error ? cause.message : String(cause)
       });
     }
-    // Serialize to the ACP `McpServer` wire shape: `args` is required and `env`
-    // is an array of `{ name, value }` — NOT the ergonomic `Record` we accept
-    // from hosts. Passing a record (or omitting args) makes strict agents (e.g.
-    // Gemini) fail `session/new` with an opaque "-32603 Internal error".
-    const mcpServers = (options.mcpServers ?? this.defaultMcpServers).map((server) => ({
-      name: server.name,
-      command: server.command,
-      args: server.args ?? [],
-      env: Object.entries(server.env ?? {}).map(([name, value]) => ({ name, value }))
-    }));
-    const result = await this.transport.request("session/new", {
-      cwd,
-      mcpServers
-    });
+    const configuredMcpServers = options.mcpServers ?? this.defaultMcpServers;
+    this.assertMcpTransportSupport(configuredMcpServers);
+    const mcpServers = normalizeAcpMcpServerConfigs(configuredMcpServers);
+    const method = options.lifecycle === "load" ? "session/load" : "session/new";
+    let result: unknown;
+    try {
+      result = await this.transport.request(method, {
+        cwd,
+        mcpServers,
+        ...(options.lifecycle === "load"
+          ? { sessionId: options.protocolSessionId }
+          : {})
+      });
+    } catch (cause) {
+      const message = redactAcpMcpCredentials(
+        errorMessage(cause),
+        configuredMcpServers
+      );
+      throw new Error(`ACP ${method} failed: ${message}`);
+    }
     const record = asRecord(result);
     const protocolSessionId =
-      readString(record, "sessionId") ?? readString(record, "session_id");
+      options.lifecycle === "load"
+        ? options.protocolSessionId
+        : readString(record, "sessionId") ?? readString(record, "session_id");
     if (!protocolSessionId) {
-      throw new Error("ACP session/new did not return a session id");
+      throw new Error(`ACP ${method} did not provide a session id`);
     }
     // Prefer the agent's session GUID for the host-facing `threadId` (it's the
     // id ACP already hands us, so the thread is traceable straight to the live
@@ -439,15 +487,17 @@ export class AcpAgentClient implements AgentBackend {
       runtimeState: undefined,
       pendingTurn: undefined,
       pendingInstructions: options.instructions,
-      // Remember the MCP servers attached to THIS session so its tools can be
-      // auto-approved even when the (pooled, shared) client has no client-level
-      // `mcpServers` default.
-      mcpServerNames: (options.mcpServers ?? this.defaultMcpServers).map((server) => server.name)
+      // Remember ONLY the MCP servers attached to THIS session so the host's
+      // approval policy never sees another pooled thread's tool set.
+      mcpServerNames: configuredMcpServers.map((server) => server.name)
     };
     this.sessions.set(threadId, session);
     this.threadIdByProtocolId.set(protocolSessionId, threadId);
 
-    const runtimeCapabilities = this.captureRuntimeCapabilities("session-new", result);
+    const runtimeCapabilities = this.captureRuntimeCapabilities(
+      options.lifecycle === "load" ? "session-load" : "session-new",
+      result
+    );
     if (runtimeCapabilities) {
       const runtimeState = acpSessionRuntimeStateFromCapabilities(
         runtimeCapabilities,
@@ -458,10 +508,11 @@ export class AcpAgentClient implements AgentBackend {
       this.emitThreadSettings(session, runtimeCapabilities, runtimeState);
     }
 
-    this.logger.debug("acp thread started", {
+    this.logger.debug("acp thread opened", {
       threadId,
       protocolSessionId,
-      resumed: options.bindThreadId !== undefined
+      lifecycle: options.lifecycle,
+      rebound: options.bindThreadId !== undefined
     });
     const out: AgentBackendStartThreadResult = { threadId };
     // Effective model — prefers `models.currentModelId`, falling back to the
@@ -809,17 +860,6 @@ export class AcpAgentClient implements AgentBackend {
     throw new Error(`Unsupported ACP request: ${method}`);
   }
 
-  /** Every MCP server name this client knows about — the client-level default
-   *  plus the per-thread servers of every live session. Used to auto-approve a
-   *  configured MCP tool regardless of which session's permission request it is. */
-  private knownMcpServerNames(): string[] {
-    const names = new Set(this.defaultMcpServers.map((server) => server.name));
-    for (const session of this.sessions.values()) {
-      for (const name of session.mcpServerNames) names.add(name);
-    }
-    return [...names];
-  }
-
   private async handlePermissionRequest(
     params: Record<string, unknown>,
     id?: JsonRpcId
@@ -835,10 +875,10 @@ export class AcpAgentClient implements AgentBackend {
     // goes to the host's approval handler, which owns the policy (e.g. a host
     // may pre-approve tools from MCP servers IT configured). We give the host
     // the context the raw ACP params lack: the RESOLVED `threadId` (params only
-    // carry a `sessionId`) and `mcpServerNames` — the union of this client's
-    // default servers and every live session's per-thread servers — so the host
-    // can recognize a tool call that targets a server it wired up. With no
-    // handler registered there's no one to decide, so the request is cancelled.
+    // carry a `sessionId`) and ONLY that session's `mcpServerNames`, so a pooled
+    // client never exposes another thread's configured tool set to this policy
+    // decision. With no handler registered there's no one to decide, so the
+    // request is cancelled.
     const handler = this.approvalHandler;
     if (!handler) {
       return cancelledPermissionOutcome();
@@ -857,7 +897,9 @@ export class AcpAgentClient implements AgentBackend {
 
     const handlerParams: Record<string, unknown> = {
       ...params,
-      mcpServerNames: this.knownMcpServerNames()
+      mcpServerNames: threadId
+        ? (this.sessions.get(threadId)?.mcpServerNames ?? [])
+        : []
     };
     if (threadId !== undefined) handlerParams.threadId = threadId;
     const decision = await handler("session/request_permission", handlerParams);
@@ -1036,9 +1078,43 @@ export class AcpAgentClient implements AgentBackend {
     return session;
   }
 
+  private assertMcpTransportSupport(
+    servers: readonly AcpMcpServerConfig[]
+  ): void {
+    for (const server of servers) {
+      if (!("type" in server)) continue;
+      if (
+        server.type === "http" &&
+        !acpRuntimeSupportsHttpMcp(this.runtimeCapabilities)
+      ) {
+        throw new Error(
+          `ACP agent does not advertise HTTP MCP support for server "${server.name}"`
+        );
+      }
+      if (
+        server.type === "sse" &&
+        !acpRuntimeSupportsSseMcp(this.runtimeCapabilities)
+      ) {
+        throw new Error(
+          `ACP agent does not advertise SSE MCP support for server "${server.name}"`
+        );
+      }
+    }
+  }
+
   /** Whether the agent advertises session/load support (for hosts that resume). */
   supportsSessionLoad(): boolean {
     return acpRuntimeSupportsSessionLoad(this.runtimeCapabilities);
+  }
+
+  /** Whether the initialize result explicitly advertises streamable HTTP MCP. */
+  supportsHttpMcp(): boolean {
+    return acpRuntimeSupportsHttpMcp(this.runtimeCapabilities);
+  }
+
+  /** Whether the initialize result explicitly advertises legacy HTTP+SSE MCP. */
+  supportsSseMcp(): boolean {
+    return acpRuntimeSupportsSseMcp(this.runtimeCapabilities);
   }
 }
 

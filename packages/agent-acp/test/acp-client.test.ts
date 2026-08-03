@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   NormalizedApprovalDecision,
   NormalizedThreadEvent
@@ -118,6 +118,171 @@ describe("AcpAgentClient — lifecycle", () => {
         { name: "SOCKET", value: "/tmp/x.sock" }
       ]
     });
+  });
+
+  it("forwards HTTP and SSE MCP servers when initialize advertises them", async () => {
+    const transport = new FakeAcpAgentTransport({
+      initialize: {
+        protocolVersion: 1,
+        agentCapabilities: { mcpCapabilities: { http: true, sse: true } }
+      }
+    });
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      mcpServers: [
+        {
+          name: "remote-http",
+          type: "http",
+          url: "https://mcp.example.test/rpc",
+          headers: { Authorization: "Bearer http-secret" }
+        },
+        {
+          name: "remote-sse",
+          type: "sse",
+          url: "https://mcp.example.test/events",
+          headers: [{ name: "X-Api-Key", value: "sse-secret" }]
+        }
+      ]
+    });
+
+    await client.startThread();
+
+    expect(client.supportsHttpMcp()).toBe(true);
+    expect(client.supportsSseMcp()).toBe(true);
+    expect(
+      transport.requests.find(({ method }) => method === "session/new")?.params
+    ).toMatchObject({
+      mcpServers: [
+        {
+          name: "remote-http",
+          type: "http",
+          url: "https://mcp.example.test/rpc",
+          headers: [{ name: "Authorization", value: "Bearer http-secret" }]
+        },
+        {
+          name: "remote-sse",
+          type: "sse",
+          url: "https://mcp.example.test/events",
+          headers: [{ name: "X-Api-Key", value: "sse-secret" }]
+        }
+      ]
+    });
+  });
+
+  it("gates optional remote transports on the initialize advertisement", async () => {
+    const transport = new FakeAcpAgentTransport();
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      mcpServers: [
+        {
+          name: "remote-http",
+          type: "http",
+          url: "https://mcp.example.test/rpc",
+          headers: []
+        }
+      ]
+    });
+
+    await expect(client.startThread()).rejects.toThrow(
+      'does not advertise HTTP MCP support for server "remote-http"'
+    );
+    expect(client.supportsHttpMcp()).toBe(false);
+    expect(transport.requests.map(({ method }) => method)).toEqual(["initialize"]);
+  });
+
+  it("forwards per-thread MCP servers on ACP session/load", async () => {
+    const transport = new FakeAcpAgentTransport({
+      initialize: {
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          mcpCapabilities: { http: true }
+        }
+      },
+      "session/load": {
+        models: {
+          availableModels: [{ modelId: "loaded-model", name: "Loaded" }],
+          currentModelId: "loaded-model"
+        }
+      }
+    });
+    const client = new AcpAgentClient({ transport, strategy: geminiStrategy });
+
+    const loaded = await client.loadThreadNative({
+      sessionId: "persisted-session",
+      threadId: "host-thread",
+      cwd: "/loaded",
+      mcpServers: [
+        {
+          name: "loaded-tools",
+          type: "http",
+          url: "https://mcp.example.test/loaded",
+          headers: [{ name: "Authorization", value: "Bearer loaded" }]
+        }
+      ]
+    });
+
+    expect(loaded).toMatchObject({ threadId: "host-thread", model: "loaded-model" });
+    expect(
+      transport.requests.find(({ method }) => method === "session/load")?.params
+    ).toEqual({
+      cwd: "/loaded",
+      sessionId: "persisted-session",
+      mcpServers: [
+        {
+          name: "loaded-tools",
+          type: "http",
+          url: "https://mcp.example.test/loaded",
+          headers: [{ name: "Authorization", value: "Bearer loaded" }]
+        }
+      ]
+    });
+  });
+
+  it("redacts MCP credentials and remote URLs from lifecycle errors and logs", async () => {
+    const url = "https://user:password@mcp.example.test/rpc?token=url-secret";
+    const header = "Bearer header-secret";
+    const transport = new FakeAcpAgentTransport({
+      initialize: {
+        protocolVersion: 1,
+        agentCapabilities: { mcpCapabilities: { http: true } }
+      },
+      "session/new": new Error(`remote rejected ${url} using ${header}`)
+    });
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      logger,
+      mcpServers: [
+        {
+          name: "remote-http",
+          type: "http",
+          url,
+          headers: [{ name: "Authorization", value: header }]
+        }
+      ]
+    });
+
+    let message = "";
+    try {
+      await client.startThread();
+    } catch (cause) {
+      message = cause instanceof Error ? cause.message : String(cause);
+    }
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain(url);
+    expect(message).not.toContain(header);
+    const logged = JSON.stringify(Object.values(logger).flatMap((mock) => mock.mock.calls));
+    expect(logged).not.toContain(url);
+    expect(logged).not.toContain(header);
   });
 
   it("folds startThread instructions into the FIRST turn prompt, once", async () => {
@@ -398,6 +563,83 @@ describe("AcpAgentClient — lifecycle", () => {
     expect(outcome).toEqual({
       outcome: { outcome: "selected", optionId: "proceed_always_server" }
     });
+    await client.close();
+  });
+
+  it("isolates remote MCP payloads and approval context between pooled threads", async () => {
+    const transport = new FakeAcpAgentTransport({
+      initialize: {
+        protocolVersion: 1,
+        agentCapabilities: { mcpCapabilities: { http: true } }
+      }
+    });
+    const client = new AcpAgentClient({ transport, strategy: geminiStrategy });
+    await client.reopenThread({
+      threadId: "host-a",
+      mcpServers: [
+        {
+          name: "tools-a",
+          type: "http",
+          url: "https://a.example.test/mcp",
+          headers: [{ name: "Authorization", value: "Bearer a" }]
+        }
+      ]
+    });
+    transport.setNextSessionId("session-2");
+    await client.reopenThread({
+      threadId: "host-b",
+      mcpServers: [
+        {
+          name: "tools-b",
+          type: "http",
+          url: "https://b.example.test/mcp",
+          headers: [{ name: "Authorization", value: "Bearer b" }]
+        }
+      ]
+    });
+
+    const sessionRequests = transport.requests.filter(
+      ({ method }) => method === "session/new"
+    );
+    expect(sessionRequests[0]?.params?.mcpServers).toEqual([
+      {
+        name: "tools-a",
+        type: "http",
+        url: "https://a.example.test/mcp",
+        headers: [{ name: "Authorization", value: "Bearer a" }]
+      }
+    ]);
+    expect(sessionRequests[1]?.params?.mcpServers).toEqual([
+      {
+        name: "tools-b",
+        type: "http",
+        url: "https://b.example.test/mcp",
+        headers: [{ name: "Authorization", value: "Bearer b" }]
+      }
+    ]);
+
+    const contexts: Array<{ threadId?: unknown; mcpServerNames?: unknown }> = [];
+    client.onApprovalRequest(async (_method, params) => {
+      const context = params as { threadId?: unknown; mcpServerNames?: unknown };
+      contexts.push({
+        threadId: context.threadId,
+        mcpServerNames: context.mcpServerNames
+      });
+      return "approved";
+    });
+    const permission = (sessionId: string) =>
+      transport.emitRequest("session/request_permission", {
+        sessionId,
+        toolCall: { toolCallId: `tool-${sessionId}`, title: "remote tool", kind: "other" },
+        options: [{ optionId: "allow", kind: "allow_once" }]
+      });
+    await permission("session-1");
+    await permission("session-2");
+
+    expect(contexts).toEqual([
+      { threadId: "host-a", mcpServerNames: ["tools-a"] },
+      { threadId: "host-b", mcpServerNames: ["tools-b"] }
+    ]);
     await client.close();
   });
 

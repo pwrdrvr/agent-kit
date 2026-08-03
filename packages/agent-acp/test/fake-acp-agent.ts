@@ -114,6 +114,10 @@ export class FakeAcpAgentTransport implements AcpJsonRpcTransport {
     return this.pendingPrompt !== undefined;
   }
 
+  setNextSessionId(sessionId: string): void {
+    this.nextSessionId = sessionId;
+  }
+
   emitSessionUpdate(sessionId: string, update: Record<string, unknown>): void {
     for (const listener of this.listeners) {
       listener("session/update", { sessionId, update });
