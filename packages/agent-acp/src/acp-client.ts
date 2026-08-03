@@ -445,6 +445,41 @@ export class AcpAgentClient implements AgentBackend {
     this.assertMcpTransportSupport(configuredMcpServers);
     const mcpServers = normalizeAcpMcpServerConfigs(configuredMcpServers);
     const method = options.lifecycle === "load" ? "session/load" : "session/new";
+    // `session/load` replays history through `session/update` notifications
+    // WHILE the request is in flight. Its protocol id is already known, so
+    // install the routing state before sending the request; otherwise replayed
+    // updates arrive as "unknown session" and are silently dropped.
+    let session: AcpSessionState | undefined;
+    if (options.lifecycle === "load") {
+      const protocolSessionId = options.protocolSessionId;
+      if (!protocolSessionId) {
+        throw new Error("ACP session/load did not provide a session id");
+      }
+      const threadId =
+        options.bindThreadId ??
+        `acp:${this.strategy.id}:${isUuid(protocolSessionId) ? protocolSessionId : randomUUID()}`;
+      if (this.sessions.has(threadId)) {
+        throw new Error(`ACP thread is already open: ${threadId}`);
+      }
+      const mappedThreadId = this.threadIdByProtocolId.get(protocolSessionId);
+      if (mappedThreadId !== undefined) {
+        throw new Error(
+          `ACP session is already loaded for thread: ${mappedThreadId}`
+        );
+      }
+      session = {
+        threadId,
+        protocolSessionId,
+        normalizer: new AcpSessionNormalizer({ quirks: this.strategy.quirks }),
+        turnId: undefined,
+        runtimeState: undefined,
+        pendingTurn: undefined,
+        pendingInstructions: options.instructions,
+        mcpServerNames: configuredMcpServers.map((server) => server.name)
+      };
+      this.sessions.set(threadId, session);
+      this.threadIdByProtocolId.set(protocolSessionId, threadId);
+    }
     let result: unknown;
     try {
       result = await this.transport.request(method, {
@@ -459,6 +494,20 @@ export class AcpAgentClient implements AgentBackend {
         errorMessage(cause),
         configuredMcpServers
       );
+      // A failed load never established a live session. Remove only the exact
+      // provisional entries installed above so later notifications cannot
+      // route into a dead session.
+      if (session !== undefined) {
+        if (this.sessions.get(session.threadId) === session) {
+          this.sessions.delete(session.threadId);
+        }
+        if (
+          this.threadIdByProtocolId.get(session.protocolSessionId) ===
+          session.threadId
+        ) {
+          this.threadIdByProtocolId.delete(session.protocolSessionId);
+        }
+      }
       throw new Error(`ACP ${method} failed: ${message}`);
     }
     const record = asRecord(result);
@@ -477,9 +526,10 @@ export class AcpAgentClient implements AgentBackend {
     // the agent's choice. Never a plain integer counter. On resume, bind to the
     // caller's existing thread id instead of minting one.
     const threadId =
+      session?.threadId ??
       options.bindThreadId ??
       `acp:${this.strategy.id}:${isUuid(protocolSessionId) ? protocolSessionId : randomUUID()}`;
-    const session: AcpSessionState = {
+    session ??= {
       threadId,
       protocolSessionId,
       normalizer: new AcpSessionNormalizer({ quirks: this.strategy.quirks }),
@@ -491,8 +541,10 @@ export class AcpAgentClient implements AgentBackend {
       // approval policy never sees another pooled thread's tool set.
       mcpServerNames: configuredMcpServers.map((server) => server.name)
     };
-    this.sessions.set(threadId, session);
-    this.threadIdByProtocolId.set(protocolSessionId, threadId);
+    if (options.lifecycle === "new") {
+      this.sessions.set(threadId, session);
+      this.threadIdByProtocolId.set(protocolSessionId, threadId);
+    }
 
     const runtimeCapabilities = this.captureRuntimeCapabilities(
       options.lifecycle === "load" ? "session-load" : "session-new",

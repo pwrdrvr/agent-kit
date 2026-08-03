@@ -241,6 +241,94 @@ describe("AcpAgentClient — lifecycle", () => {
     });
   });
 
+  it("routes history replay notifications while session/load is in flight", async () => {
+    let finishLoad: (value: unknown) => void = () => undefined;
+    const loadResponse = new Promise<unknown>((resolve) => {
+      finishLoad = resolve;
+    });
+    const transport = new FakeAcpAgentTransport({
+      initialize: {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true }
+      },
+      "session/load": loadResponse
+    });
+    const client = new AcpAgentClient({ transport, strategy: geminiStrategy });
+    const events: NormalizedThreadEvent[] = [];
+    client.onEvent((event) => events.push(event));
+
+    const loading = client.loadThreadNative({
+      sessionId: "persisted-session",
+      threadId: "host-thread",
+      cwd: "/loaded"
+    });
+    await flush();
+    expect(transport.requests.some(({ method }) => method === "session/load")).toBe(true);
+
+    // ACP streams restored history before the load response. The known session
+    // id must already route to the host thread at this point.
+    transport.emitSessionUpdate("persisted-session", {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "restored history" }
+    });
+    finishLoad({});
+    await loading;
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_message_delta",
+        threadId: "host-thread",
+        delta: "restored history"
+      })
+    );
+  });
+
+  it("removes provisional session/load routing when the request fails", async () => {
+    let failLoad: (cause: Error) => void = () => undefined;
+    const loadResponse = new Promise<unknown>((_resolve, reject) => {
+      failLoad = reject;
+    });
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const transport = new FakeAcpAgentTransport({
+      initialize: {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true }
+      },
+      "session/load": loadResponse
+    });
+    const client = new AcpAgentClient({
+      transport,
+      strategy: geminiStrategy,
+      logger
+    });
+    const events: NormalizedThreadEvent[] = [];
+    client.onEvent((event) => events.push(event));
+
+    const loading = client.loadThreadNative({
+      sessionId: "persisted-session",
+      threadId: "host-thread"
+    });
+    const assertion = expect(loading).rejects.toThrow("load failed");
+    await flush();
+    failLoad(new Error("load failed"));
+    await assertion;
+
+    transport.emitSessionUpdate("persisted-session", {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "must be dropped" }
+    });
+    expect(events).toEqual([]);
+    expect(logger.debug).toHaveBeenCalledWith(
+      "acp session/update for unknown session",
+      { protocolSessionId: "persisted-session" }
+    );
+  });
+
   it("redacts MCP credentials and remote URLs from lifecycle errors and logs", async () => {
     const url = "https://user:password@mcp.example.test/rpc?token=url-secret";
     const header = "Bearer header-secret";
