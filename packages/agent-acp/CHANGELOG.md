@@ -1,5 +1,11 @@
 # @pwrdrvr/agent-acp
 
+## 0.12.3
+
+### Patch Changes
+
+- 8e3772e: Migrate the ACP wire dependency from the deprecated `@zed-industries/agent-client-protocol` package to `@agentclientprotocol/sdk` without changing the adapter API.
+
 ## 0.12.2
 
 ### Patch Changes
