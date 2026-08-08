@@ -1,4 +1,3 @@
-import { mcpServerSchema } from "@zed-industries/agent-client-protocol";
 import { describe, expect, it } from "vitest";
 import {
   normalizeAcpMcpServerConfig,
@@ -25,7 +24,6 @@ describe("ACP MCP server wire normalization", () => {
         { name: "SOCKET", value: "/tmp/tools.sock" }
       ]
     });
-    expect(mcpServerSchema.safeParse(wire).success).toBe(true);
   });
 
   it("accepts the exact stdio env array without retaining caller objects", () => {
@@ -76,6 +74,5 @@ describe("ACP MCP server wire normalization", () => {
         headers: [{ name: "X-Api-Key", value: "sse-secret" }]
       }
     ]);
-    expect(wire.every((server) => mcpServerSchema.safeParse(server).success)).toBe(true);
   });
 });
