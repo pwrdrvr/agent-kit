@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { sessionNotificationSchema, type Client } from "@zed-industries/agent-client-protocol";
+import { sessionNotificationSchema, type Client } from "@agentclientprotocol/sdk";
 import {
   AcpConnection,
   rewriteOutboundAcpLine,
