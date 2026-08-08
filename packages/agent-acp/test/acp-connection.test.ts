@@ -1,11 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { sessionNotificationSchema, type Client } from "@agentclientprotocol/sdk";
-import {
-  AcpConnection,
-  rewriteOutboundAcpLine,
-  sanitizeAcpNotificationLine,
-  type AcpAgentConnection
-} from "../src/acp-connection";
+import type { Client } from "@agentclientprotocol/sdk";
+import { AcpConnection, type AcpAgentConnection } from "../src/acp-connection";
 
 /** A stub agent connection capturing calls + returning canned results. */
 function stubConnection(overrides: Partial<AcpAgentConnection> = {}): AcpAgentConnection {
@@ -18,8 +13,8 @@ function stubConnection(overrides: Partial<AcpAgentConnection> = {}): AcpAgentCo
     setSessionMode: vi.fn(async () => ({})),
     setSessionModel: vi.fn(async () => ({})),
     authenticate: vi.fn(async () => ({})),
-    extMethod: vi.fn(async () => ({ ok: true })),
-    extNotification: vi.fn(async () => undefined),
+    request: vi.fn(async () => ({ ok: true })),
+    notify: vi.fn(async () => undefined),
     ...overrides
   };
 }
@@ -71,16 +66,20 @@ describe("AcpConnection — request() maps method strings to library calls", () 
     expect(conn.setSessionMode).toHaveBeenCalledWith({ sessionId: "sess-1", modeId: "auto" });
   });
 
-  it("routes a non-standard method (session/set_config_option) through extMethod", async () => {
+  it("routes a non-standard method through the SDK's generic request()", async () => {
     const conn = stubConnection();
     const { acp } = makeConnection(conn);
     expect(await acp.request("session/set_config_option", { key: "k", value: "v" })).toEqual({
       ok: true
     });
-    expect(conn.extMethod).toHaveBeenCalledWith("session/set_config_option", {
-      key: "k",
-      value: "v"
-    });
+    expect(conn.request).toHaveBeenCalledWith("session/set_config_option", { key: "k", value: "v" });
+  });
+
+  it("routes a non-standard notification through the SDK's generic notify()", async () => {
+    const conn = stubConnection();
+    const { acp } = makeConnection(conn);
+    await acp.notify("session/vendor_notification", { sessionId: "sess-1" });
+    expect(conn.notify).toHaveBeenCalledWith("session/vendor_notification", { sessionId: "sess-1" });
   });
 
   it("session/cancel goes to cancel() (request and notify)", async () => {
@@ -93,7 +92,7 @@ describe("AcpConnection — request() maps method strings to library calls", () 
 });
 
 describe("AcpConnection — bridges agent→client traffic to onNotification/onRequest", () => {
-  it("emits session/update with the full notification ({ sessionId, update })", async () => {
+  it("emits session/update with the full notification payload", async () => {
     const conn = stubConnection();
     const { acp, client } = makeConnection(conn);
     const seen: Array<[string, unknown]> = [];
@@ -108,6 +107,33 @@ describe("AcpConnection — bridges agent→client traffic to onNotification/onR
     await client().sessionUpdate(notification as never);
 
     expect(seen).toEqual([["session/update", notification]]);
+  });
+
+  it("preserves SDK 1.3 config updates and scalar tool raw output", async () => {
+    const conn = stubConnection();
+    const { acp, client } = makeConnection(conn);
+    const seen: Array<[string, unknown]> = [];
+    acp.onNotification((method, params) => seen.push([method, params]));
+    await acp.request("initialize", {});
+
+    const configUpdate = {
+      sessionId: "sess-1",
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: [{ id: "thinking", currentValue: "off" }]
+      }
+    };
+    const toolUpdate = {
+      sessionId: "sess-1",
+      update: { sessionUpdate: "tool_call_update", toolCallId: "tool-1", rawOutput: "plain text" }
+    };
+    await client().sessionUpdate(configUpdate as never);
+    await client().sessionUpdate(toolUpdate as never);
+
+    expect(seen).toEqual([
+      ["session/update", configUpdate],
+      ["session/update", toolUpdate]
+    ]);
   });
 
   it("emits vendor notifications via extNotification under their own method name", async () => {
@@ -149,149 +175,5 @@ describe("AcpConnection — bridges agent→client traffic to onNotification/onR
     await expect(client().requestPermission({ sessionId: "sess-1" } as never)).rejects.toThrow(
       /request handler unavailable/
     );
-  });
-});
-
-describe("rewriteOutboundAcpLine", () => {
-  it("strips the `_` prefix the library adds to session/set_config_option", () => {
-    const out = rewriteOutboundAcpLine(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: 7,
-        method: "_session/set_config_option",
-        params: { sessionId: "s", configId: "thinking", value: "off" }
-      })
-    );
-    const parsed = JSON.parse(out);
-    expect(parsed.method).toBe("session/set_config_option");
-    // id + params preserved (id-based correlation must still match).
-    expect(parsed.id).toBe(7);
-    expect(parsed.params).toEqual({ sessionId: "s", configId: "thinking", value: "off" });
-  });
-
-  it("leaves the standard (already-bare) config-option method untouched", () => {
-    const line = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/set_config_option", params: {} });
-    expect(rewriteOutboundAcpLine(line)).toBe(line);
-  });
-
-  it("leaves other extension methods and standard methods untouched", () => {
-    const vendor = JSON.stringify({ jsonrpc: "2.0", id: 2, method: "_session/vendor_thing", params: {} });
-    expect(rewriteOutboundAcpLine(vendor)).toBe(vendor);
-    const prompt = JSON.stringify({ jsonrpc: "2.0", id: 3, method: "session/prompt", params: {} });
-    expect(rewriteOutboundAcpLine(prompt)).toBe(prompt);
-  });
-
-  it("passes non-JSON / empty / partial lines through unchanged", () => {
-    expect(rewriteOutboundAcpLine("")).toBe("");
-    expect(rewriteOutboundAcpLine("not json")).toBe("not json");
-    expect(rewriteOutboundAcpLine('{"partial":')).toBe('{"partial":');
-  });
-});
-
-describe("sanitizeAcpNotificationLine", () => {
-  // Regression: 0.9.0 adopted the official ACP library, which validates inbound
-  // notifications. Its schema types tool_call(_update).rawInput/rawOutput as
-  // z.record (a plain object), but Kimi sends rawOutput as a JSON STRING or
-  // ARRAY — failing validation and dropping the whole session/update.
-  const line = (update: Record<string, unknown>): string =>
-    JSON.stringify({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: { sessionId: "session_x", update }
-    });
-  const paramsOf = (raw: string): unknown => (JSON.parse(raw) as { params: unknown }).params;
-
-  it("a Kimi-style string rawOutput FAILS the real library schema before sanitizing", () => {
-    const params = paramsOf(
-      line({
-        sessionUpdate: "tool_call_update",
-        toolCallId: "0:tool_x",
-        status: "completed",
-        rawOutput: '[{"id":"layer1","name":"AI arrow"}]'
-      })
-    );
-    expect(sessionNotificationSchema.safeParse(params).success).toBe(false);
-  });
-
-  it("wraps a non-object rawOutput so it PASSES the real library schema", () => {
-    for (const rawOutput of ['[{"id":"l1"}]', "a string", 42, true]) {
-      const sanitized = sanitizeAcpNotificationLine(
-        line({ sessionUpdate: "tool_call_update", toolCallId: "t", rawOutput })
-      );
-      expect(
-        sessionNotificationSchema.safeParse(paramsOf(sanitized)).success,
-        `rawOutput=${JSON.stringify(rawOutput)}`
-      ).toBe(true);
-      const out = (paramsOf(sanitized) as { update: { rawOutput: unknown } }).update.rawOutput;
-      expect(out).toEqual({ value: rawOutput }); // data preserved
-    }
-  });
-
-  it("wraps an ARRAY rawOutput (render_composite shape)", () => {
-    const sanitized = sanitizeAcpNotificationLine(
-      line({ sessionUpdate: "tool_call_update", toolCallId: "t", rawOutput: [{ a: 1 }, { b: 2 }] })
-    );
-    expect(sessionNotificationSchema.safeParse(paramsOf(sanitized)).success).toBe(true);
-  });
-
-  it("also fixes rawInput and the initial tool_call notification", () => {
-    const sanitized = sanitizeAcpNotificationLine(
-      line({ sessionUpdate: "tool_call", toolCallId: "t", title: "Call x", rawInput: "not-an-object" })
-    );
-    expect(sessionNotificationSchema.safeParse(paramsOf(sanitized)).success).toBe(true);
-  });
-
-  it("leaves a valid OBJECT rawInput untouched (normal tool args)", () => {
-    const sanitized = sanitizeAcpNotificationLine(
-      line({
-        sessionUpdate: "tool_call_update",
-        toolCallId: "t",
-        rawInput: { capture_id: "r6qk", color: "#3b82f6" }
-      })
-    );
-    const out = (paramsOf(sanitized) as { update: { rawInput: unknown } }).update.rawInput;
-    expect(out).toEqual({ capture_id: "r6qk", color: "#3b82f6" });
-  });
-
-  it("drops an explicit null rawOutput (schema is optional, not nullable)", () => {
-    const sanitized = sanitizeAcpNotificationLine(
-      line({ sessionUpdate: "tool_call_update", toolCallId: "t", rawOutput: null })
-    );
-    const update = (paramsOf(sanitized) as { update: Record<string, unknown> }).update;
-    expect("rawOutput" in update).toBe(false);
-    expect(sessionNotificationSchema.safeParse(paramsOf(sanitized)).success).toBe(true);
-  });
-
-  it("passes through non-session/update lines and malformed JSON unchanged", () => {
-    const other = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } });
-    expect(sanitizeAcpNotificationLine(other)).toBe(other);
-    expect(sanitizeAcpNotificationLine("not json at all")).toBe("not json at all");
-    expect(sanitizeAcpNotificationLine("")).toBe("");
-  });
-
-  it("DROPS a config_option_update notification (library schema has no such variant)", () => {
-    // Kimi echoes a config_option_update after a set_config_option; the library
-    // can't parse it (→ "Error handling notification" -32602). Empty return = drop.
-    const configUpdate = JSON.stringify({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: {
-        sessionId: "s",
-        update: {
-          sessionUpdate: "config_option_update",
-          configOptions: [{ id: "thinking", currentValue: "off" }]
-        }
-      }
-    });
-    expect(sanitizeAcpNotificationLine(configUpdate)).toBe("");
-  });
-
-  it("leaves a recognized session/update (agent_message_chunk) untouched", () => {
-    const chunk = JSON.stringify({
-      jsonrpc: "2.0",
-      method: "session/update",
-      params: { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", content: "hi" } }
-    });
-    expect(sanitizeAcpNotificationLine(chunk)).toBe(chunk);
   });
 });

@@ -79,16 +79,14 @@ pnpm lint:deps     # single-version guard (zod)
 
 `@pwrdrvr/agent-acp` speaks ACP through
 [`@agentclientprotocol/sdk`](https://www.npmjs.com/package/@agentclientprotocol/sdk),
-which pins **`zod@^3`** at the compatible `0.4.5` SDK release. First-party packages here
-(`@pwrdrvr/agent-client`, and consumers like PwrAgent / PwrSnap) use **`zod@^4`**.
-Left alone, an app that depends on both ends up with **two copies of zod** —
-wasted bundle, and the classic cross-instance footgun where a schema built by
-one copy fails `instanceof` against the other.
+which declares **`zod@^3.25 || ^4`** as a peer from SDK 1.3 onward. First-party
+packages here (`@pwrdrvr/agent-client`, and consumers like PwrAgent / PwrSnap)
+use **`zod@^4`**. A single resolved copy avoids unnecessary bundle weight and the
+cross-instance footgun where a schema built by one copy fails `instanceof`
+against the other.
 
-agent-acp imports nothing from zod directly — its only zod is the zed lib's
-internal validation — and the zed lib runs **clean under zod 4** (its schemas are
-exercised by agent-acp's `acp-connection` tests). So we collapse to a single zod
-with one root override:
+agent-acp imports nothing from zod directly. This repo resolves the SDK peer and
+the first-party packages to one zod 4 copy with a root override:
 
 ```jsonc
 // package.json
@@ -97,10 +95,9 @@ with one root override:
 
 This repo ships that override and a CI guard (`pnpm lint:deps`,
 [scripts/check-single-version-deps.mjs](scripts/check-single-version-deps.mjs))
-that fails if a second zod ever creeps back in. **Consumers should add the same
-override to their own root `package.json`** — a dependency's overrides don't
-propagate, so the dedupe has to be declared where the install root is. Drop the
-override once the ACP SDK ships zod 4 natively.
+that fails if a second zod ever creeps back in. The SDK peer works with a
+consumer's existing zod 4 installation; add an install-root override only when
+your package manager resolves more than one compatible copy.
 
 ## Release
 

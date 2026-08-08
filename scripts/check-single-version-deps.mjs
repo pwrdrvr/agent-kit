@@ -5,13 +5,12 @@
 // bundles, and worse, cross-instance `instanceof` / schema-identity failures
 // when two copies of the same library meet at a package boundary.
 //
-// zod is the motivating case: `@agentclientprotocol/sdk` pins
-// `zod@^3`, while `@pwrdrvr/agent-client` (and consumers) use `zod@^4`. We
-// collapse that to a single zod via the root `pnpm.overrides.zod` (the ACP SDK
-// validates cleanly under zod 4 — its schemas are exercised by agent-acp's
-// acp-connection tests). This guard makes sure the collapse STAYS collapsed: if
-// a future dependency bump reintroduces a second zod, CI fails here with a
-// pointer to the fix instead of the duplicate shipping silently.
+// zod is the motivating case: `@agentclientprotocol/sdk` accepts
+// `zod@^3.25 || ^4`, while `@pwrdrvr/agent-client` (and consumers) use `zod@^4`.
+// The root `pnpm.overrides.zod` resolves the workspace to that one compatible
+// copy. This guard makes sure the collapse STAYS collapsed: if a future
+// dependency bump reintroduces a second zod, CI fails here with a pointer to the
+// fix instead of the duplicate shipping silently.
 //
 // Reads pnpm-lock.yaml (lockfileVersion 9). No yaml dependency — package keys
 // are matched textually from the `packages:` section.
