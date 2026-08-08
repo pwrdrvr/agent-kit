@@ -18,13 +18,24 @@ export {
   reasoningValueForThoughtLevel,
   type AcpAgentClientOptions,
   type AcpStartThreadOptions,
+  type AcpLoadThreadOptions,
   type AcpStartTurnOptions,
   type AcpPromptContentBlock,
-  type AcpMcpServerConfig,
   type AcpRuntimeOptionSource,
   type AcpTitleHandler,
   type AcpRuntimeCapabilitiesHandler
 } from "./acp-client";
+export {
+  normalizeAcpMcpServerConfig,
+  normalizeAcpMcpServerConfigs,
+  type AcpMcpServerConfig,
+  type AcpStdioMcpServerConfig,
+  type AcpHttpMcpServerConfig,
+  type AcpSseMcpServerConfig,
+  type AcpMcpKeyValue,
+  type AcpMcpKeyValueCollection,
+  type AcpMcpServerWireConfig
+} from "./mcp-server-config";
 export {
   AcpAgentClientPool,
   type AcpAgentClientFactory,
@@ -69,7 +80,9 @@ export {
 
 export {
   normalizeAcpRuntimeCapabilities,
+  acpRuntimeSupportsHttpMcp,
   acpRuntimeSupportsSessionLoad,
+  acpRuntimeSupportsSseMcp,
   acpSessionRuntimeStateFromCapabilities,
   acpSessionRuntimeStateFromUpdate,
   mergeAcpRuntimeState,
@@ -87,6 +100,7 @@ export {
   type AcpRuntimeModels,
   type AcpRuntimeAgentInfo,
   type AcpRuntimeAgentCapabilities,
+  type AcpRuntimeMcpCapabilities,
   type AcpSessionRuntimeState
 } from "./normalizer/runtime-capabilities";
 

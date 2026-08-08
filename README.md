@@ -60,6 +60,51 @@ Do not build the Codex catalog with `tools.map(toDynamicToolSpec)`: that
 compatibility helper can only produce a one-tool namespace at a time and cannot
 group a namespaced catalog.
 
+## ACP MCP servers
+
+`@pwrdrvr/agent-acp` accepts the ACP v1 stdio, streamable HTTP, and HTTP+SSE MCP
+server shapes. Stdio callers remain source-compatible: `args` may be omitted and
+`env` may remain a `Record<string, string>`. HTTP/SSE headers and stdio env may
+also be supplied as ACP-native `{ name, value }[]` collections; the package
+always serializes the exact arrays required by the pinned protocol library.
+
+```ts
+import type { AcpMcpServerConfig } from "@pwrdrvr/agent-acp";
+
+const threadMcpServers: AcpMcpServerConfig[] = [
+  {
+    name: "local-tools",
+    command: "/opt/local-tools",
+    env: { SOCKET_PATH: "/tmp/local-tools.sock" }
+  },
+  {
+    name: "remote-tools",
+    type: "http",
+    url: "https://mcp.example.com/rpc",
+    headers: [{ name: "Authorization", value: `Bearer ${token}` }]
+  }
+];
+
+await client.connect();
+if (client.supportsHttpMcp()) {
+  await client.reopenThread({ threadId, mcpServers: threadMcpServers });
+}
+```
+
+Optional HTTP and SSE transports are rejected unless the agent explicitly
+advertises them in `initialize.agentCapabilities.mcpCapabilities`. Hosts can
+gate UI/configuration with `supportsHttpMcp()` / `supportsSseMcp()` or the
+exported `acpRuntimeSupportsHttpMcp()` / `acpRuntimeSupportsSseMcp()` helpers.
+Per-thread lists are accepted by `startThreadNative`, `reopenThread`, and
+`loadThreadNative`; a pooled client keeps the wire payload and permission-policy
+server names isolated to that session. ACP v1 in the pinned library has no
+separate `session/resume` method, so the package does not invent one.
+
+PwrAgent and PwrSnap consumers can replace local stdio/HTTP/SSE unions with
+`AcpMcpServerConfig`, keep their existing `{ name, value }[]` headers unchanged,
+and pass the selected list at the per-thread lifecycle call. Credentials belong
+only in `env`/`headers`; lifecycle errors redact those values and remote URLs.
+
 The design and sequencing live in
 [docs/plans](docs/plans/2026-06-02-001-feat-agent-kit-monorepo-buildout-plan.md).
 

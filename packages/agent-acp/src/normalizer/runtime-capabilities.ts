@@ -59,8 +59,14 @@ export type AcpRuntimeAgentInfo = {
   version?: string;
 };
 
+export type AcpRuntimeMcpCapabilities = {
+  http?: boolean;
+  sse?: boolean;
+};
+
 export type AcpRuntimeAgentCapabilities = {
   loadSession?: boolean;
+  mcp?: AcpRuntimeMcpCapabilities;
   sessionHistoryReplay?: boolean;
   session?: { close?: boolean; cancel?: boolean };
   raw?: unknown;
@@ -167,6 +173,20 @@ export function acpRuntimeSupportsSessionLoad(
   capabilities: AcpRuntimeCapabilities | undefined
 ): boolean {
   return capabilities?.agentCapabilities?.loadSession !== false;
+}
+
+/** Optional ACP MCP transports are supported only when explicitly advertised. */
+export function acpRuntimeSupportsHttpMcp(
+  capabilities: AcpRuntimeCapabilities | undefined
+): boolean {
+  return capabilities?.agentCapabilities?.mcp?.http === true;
+}
+
+/** Optional ACP MCP transports are supported only when explicitly advertised. */
+export function acpRuntimeSupportsSseMcp(
+  capabilities: AcpRuntimeCapabilities | undefined
+): boolean {
+  return capabilities?.agentCapabilities?.mcp?.sse === true;
 }
 
 /** The configOption an agent uses to expose model choice (ACP `category:
@@ -447,11 +467,22 @@ function readAgentCapabilities(
   const sessionHistoryReplay =
     readBoolean(kimiMeta, "sessionHistoryReplay") ??
     readBoolean(kimiMeta, "session_history_replay");
+  const mcpRecord = asRecord(
+    record?.mcpCapabilities ?? record?.mcp_capabilities ?? record?.mcp
+  );
+  const http = readBoolean(mcpRecord, "http");
+  const sse = readBoolean(mcpRecord, "sse");
 
   const capabilities: AcpRuntimeAgentCapabilities = {
     raw: record ?? sessionCapabilities
   };
   if (loadSession !== undefined) capabilities.loadSession = loadSession;
+  if (http !== undefined || sse !== undefined) {
+    capabilities.mcp = {
+      ...(http !== undefined ? { http } : {}),
+      ...(sse !== undefined ? { sse } : {})
+    };
+  }
   if (sessionHistoryReplay !== undefined) {
     capabilities.sessionHistoryReplay = sessionHistoryReplay;
   }

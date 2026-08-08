@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AgentBackend, NormalizedThreadEvent } from "@pwrdrvr/agent-core";
 import {
+  acpRuntimeSupportsHttpMcp,
+  acpRuntimeSupportsSseMcp,
   normalizeAcpRuntimeCapabilities,
   acpSessionRuntimeStateFromUpdate,
   modelIdFromCapabilities,
@@ -80,6 +82,43 @@ describe("modelIdFromCapabilities / modelsFromCapabilities", () => {
 });
 
 describe("normalizeAcpRuntimeCapabilities — merge over initialize", () => {
+  it("normalizes optional HTTP/SSE MCP capabilities and gates on explicit true", () => {
+    const caps = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "initialize",
+      value: {
+        protocolVersion: 1,
+        agentCapabilities: {
+          mcpCapabilities: { http: true, sse: false }
+        }
+      }
+    });
+
+    expect(caps?.agentCapabilities?.mcp).toEqual({ http: true, sse: false });
+    expect(acpRuntimeSupportsHttpMcp(caps)).toBe(true);
+    expect(acpRuntimeSupportsSseMcp(caps)).toBe(false);
+    expect(acpRuntimeSupportsHttpMcp(undefined)).toBe(false);
+    expect(acpRuntimeSupportsSseMcp(undefined)).toBe(false);
+  });
+
+  it("accepts snake_case and compact MCP capability aliases", () => {
+    const snake = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "initialize",
+      value: {
+        agent_capabilities: { mcp_capabilities: { http: false, sse: true } }
+      }
+    });
+    const compact = normalizeAcpRuntimeCapabilities({
+      now: 1,
+      source: "initialize",
+      value: { agentCapabilities: { mcp: { http: true } } }
+    });
+
+    expect(snake?.agentCapabilities?.mcp).toEqual({ http: false, sse: true });
+    expect(compact?.agentCapabilities?.mcp).toEqual({ http: true });
+  });
+
   it("reads models/modes camel + snake tolerantly", () => {
     const caps = normalizeAcpRuntimeCapabilities({
       now: 1,
