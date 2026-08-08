@@ -53,15 +53,15 @@ importers:
 
   packages/agent-acp:
     dependencies:
+      '@agentclientprotocol/sdk':
+        specifier: 0.4.5
+        version: 0.4.5
       '@pwrdrvr/agent-core':
         specifier: workspace:^
         version: link:../agent-core
       '@pwrdrvr/agent-transport':
         specifier: workspace:^
         version: link:../agent-transport
-      '@zed-industries/agent-client-protocol':
-        specifier: 0.4.5
-        version: 0.4.5
     devDependencies:
       '@types/node':
         specifier: ^24.0.0
@@ -143,6 +143,9 @@ importers:
         version: 24.12.4
 
 packages:
+
+  '@agentclientprotocol/sdk@0.4.5':
+    resolution: {integrity: sha512-1cKCZvy6xJ+9n7BkUzrgFfj+waJOj21HaiYvbE4elxBCT7WAHAk5zaQ5cQfmw876TZoEP062Vxy7qkYp1rzEfw==}
 
   '@asamuzakjp/css-color@3.2.0':
     resolution: {integrity: sha512-K1A6z8tS3XsmCMM86xoWdn7Fkdn9m6RSVtocUrJYIwZnFVkng/PvkEoWtOWmP+Scc6saYWHWZYbndEEXxl24jw==}
@@ -812,10 +815,6 @@ packages:
 
   '@vitest/utils@3.2.4':
     resolution: {integrity: sha512-fB2V0JFrQSMsCo9HiSq3Ezpdv4iYaXRG1Sx8edX3MwxfyNn83mKiGzOcH+Fkxt4MHxr3y42fQi1oeAInqgX2QA==}
-
-  '@zed-industries/agent-client-protocol@0.4.5':
-    resolution: {integrity: sha512-OwHKfu5AiKul/GSJilHg36+kOSV9eOl2eYnjR6tenAQDdraSnt22WFk0SDFTeuAANz1Gxkv+DTf7Hq32rvX7FQ==}
-    deprecated: This package has been renamed to @agentclientprotocol/sdk. Please migrate to continue receiving updates.
 
   acorn-jsx-walk@2.0.0:
     resolution: {integrity: sha512-uuo6iJj4D4ygkdzd6jPtcxs8vZgDX9YFIkqczGImoypX2fQ4dVImmu3UzA4ynixCIMTrEOWW+95M2HuBaCEOVA==}
@@ -1857,6 +1856,10 @@ packages:
 
 snapshots:
 
+  '@agentclientprotocol/sdk@0.4.5':
+    dependencies:
+      zod: 4.4.3
+
   '@asamuzakjp/css-color@3.2.0':
     dependencies:
       '@csstools/css-calc': 2.1.4(@csstools/css-parser-algorithms@3.0.5(@csstools/css-tokenizer@3.0.4))(@csstools/css-tokenizer@3.0.4)
@@ -2409,10 +2412,6 @@ snapshots:
       '@vitest/pretty-format': 3.2.4
       loupe: 3.2.1
       tinyrainbow: 2.0.0
-
-  '@zed-industries/agent-client-protocol@0.4.5':
-    dependencies:
-      zod: 4.4.3
 
   acorn-jsx-walk@2.0.0: {}
 

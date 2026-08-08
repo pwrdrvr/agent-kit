@@ -1,4 +1,4 @@
-# Adopt `@zed-industries/agent-client-protocol` for the ACP wire layer
+# Adopt `@agentclientprotocol/sdk` for the ACP wire layer
 
 - **Date:** 2026-06-06
 - **Status:** Proposed
@@ -15,7 +15,7 @@ This was inherited verbatim from PwrAgnt's in-tree code; there was never a
 "build vs. buy" decision.
 
 The official, spec-tracked library exists and is healthy:
-**`@zed-industries/agent-client-protocol@0.4.5`** (Apache-2.0 — on our
+**`@agentclientprotocol/sdk@0.4.5`** (Apache-2.0 — on our
 always-allowed list). Hand-written ACP shapes drift from the spec as ACP
 evolves — the same class of bug we've hit repeatedly (Codex config churn, kimi
 help-text drift). Adopting the library moves the protocol types + the client
@@ -109,7 +109,7 @@ The old path stays intact until the new one is proven, so the package never
 ships half-migrated.
 
 ### Unit 1 — Add the dependency + a wire `AcpConnection`
-- Add `@zed-industries/agent-client-protocol` to `agent-acp` deps (pin exact if
+- Add `@agentclientprotocol/sdk` to `agent-acp` deps (pin exact if
   the pnpm trust gate flags `^`; use `--ignore-pnpmfile` as elsewhere).
 - New `src/acp-connection.ts`: spawns the agent (command + args + env from the
   strategy/discovery), wires `Readable.toWeb(stdout)` / `Writable.toWeb(stdin)`

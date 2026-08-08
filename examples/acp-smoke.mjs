@@ -1,4 +1,4 @@
-// Live ACP smoke over the @zed-industries/agent-client-protocol wire layer.
+// Live ACP smoke over the @agentclientprotocol/sdk wire layer.
 // Build first (`pnpm build`), then: node examples/acp-smoke.mjs <grok|kimi|gemini|qwen>
 // Drives discovery → AcpConnection → AcpAgentClient against a REAL installed agent
 // and prints whether a session starts and the assistant streams a reply.

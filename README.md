@@ -78,8 +78,8 @@ pnpm lint:deps     # single-version guard (zod)
 ## zod: keep it to one copy
 
 `@pwrdrvr/agent-acp` speaks ACP through
-[`@zed-industries/agent-client-protocol`](https://www.npmjs.com/package/@zed-industries/agent-client-protocol),
-which still pins **`zod@^3`** (latest `0.4.5`). First-party packages here
+[`@agentclientprotocol/sdk`](https://www.npmjs.com/package/@agentclientprotocol/sdk),
+which pins **`zod@^3`** at the compatible `0.4.5` SDK release. First-party packages here
 (`@pwrdrvr/agent-client`, and consumers like PwrAgent / PwrSnap) use **`zod@^4`**.
 Left alone, an app that depends on both ends up with **two copies of zod** —
 wasted bundle, and the classic cross-instance footgun where a schema built by
@@ -100,7 +100,7 @@ This repo ships that override and a CI guard (`pnpm lint:deps`,
 that fails if a second zod ever creeps back in. **Consumers should add the same
 override to their own root `package.json`** — a dependency's overrides don't
 propagate, so the dedupe has to be declared where the install root is. Drop the
-override once the zed lib ships zod 4 natively.
+override once the ACP SDK ships zod 4 natively.
 
 ## Release
 

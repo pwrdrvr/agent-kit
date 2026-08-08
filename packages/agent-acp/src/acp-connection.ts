@@ -1,4 +1,4 @@
-// ACP connection backed by the official `@zed-industries/agent-client-protocol`
+// ACP connection backed by the official `@agentclientprotocol/sdk`
 // library. Replaces our hand-rolled ACP wire layer (acp-stdio-transport.ts): the
 // library owns JSON-RPC framing, ndjson stdio, protocol-method dispatch, and
 // schema validation. We keep ownership of the things the library does NOT do —
@@ -22,7 +22,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionNotification
-} from "@zed-industries/agent-client-protocol";
+} from "@agentclientprotocol/sdk";
 import { noopLogger, type Logger } from "@pwrdrvr/agent-core";
 import type { JsonRpcId } from "@pwrdrvr/agent-transport";
 import type { AcpJsonRpcTransport } from "./acp-transport";
