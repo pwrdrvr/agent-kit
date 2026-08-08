@@ -1,4 +1,4 @@
-import type { McpServer } from "@zed-industries/agent-client-protocol";
+import type { McpServer } from "@agentclientprotocol/sdk";
 
 /** ACP key/value entry used by stdio environments and HTTP headers. */
 export type AcpMcpKeyValue = {
