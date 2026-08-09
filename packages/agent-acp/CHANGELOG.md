@@ -1,5 +1,17 @@
 # @pwrdrvr/agent-acp
 
+## 0.13.0
+
+### Minor Changes
+
+- 27157ba: Support ACP v1 stdio, HTTP, and SSE MCP server configurations across session
+  new and load. Normalize env/header collections to the pinned protocol wire
+  shape, expose optional transport capability helpers, isolate per-thread MCP
+  configuration on pooled clients, and redact MCP credentials from lifecycle
+  errors.
+- 2c0eb68: Upgrade the ACP SDK to 1.3.0, preserving raw tool output and configuration
+  updates that the current protocol supports.
+
 ## 0.12.3
 
 ### Patch Changes
