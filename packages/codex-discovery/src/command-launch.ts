@@ -59,7 +59,10 @@ export function createCommandInvocation(params: {
   ].join(" ");
 
   return {
-    command: readWindowsEnv(params.env, "ComSpec")?.trim() || "cmd.exe",
+    command:
+      readWindowsEnv(params.env, "ComSpec")?.trim()
+      || readWindowsEnv(process.env, "ComSpec")?.trim()
+      || "cmd.exe",
     args: ["/d", "/s", "/c", `"${shellCommand}"`],
     windowsVerbatimArguments: true,
   };
