@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { rmSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -110,8 +117,55 @@ describe.runIf(isWindows)("Windows PATHEXT expansion (win32 host)", () => {
       });
       const candidate = snapshot.candidates.find((c) => c.source === "path");
       expect(candidate?.command).toBe(cmdShim);
+      expect(candidate?.executable).toBe(true);
+      expect(candidate?.version).toBe("2.0.0");
+      expect(snapshot.selectedCommand).toBe(cmdShim);
     } finally {
       rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps version arguments as data when probing an npm-style .cmd shim", async () => {
+    const rootDir = mkdtempSync(path.join(tmpdir(), "cmddisc-win-"));
+    const binDir = path.join(rootDir, "NVM & npm");
+    const marker = path.join(rootDir, "injected.txt");
+    try {
+      mkdirSync(binDir, { recursive: true });
+      const cmdShim = path.join(binDir, "wintool.cmd");
+      const script = path.join(binDir, "wintool.js");
+      const dangerousArgument = `probe & echo injected>"${marker}"`;
+      writeFileSync(
+        script,
+        `console.log("wintool 2.0.0", JSON.stringify(process.argv.slice(2)));\n`,
+        "utf8",
+      );
+      writeFileSync(
+        cmdShim,
+        `@ECHO off\nSETLOCAL\nnode "%~dp0\\wintool.js" %*\n`,
+        "utf8",
+      );
+
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === "path") delete env[key];
+      }
+      env.Path = `${binDir};${path.dirname(process.execPath)}`;
+      env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+
+      const snapshot = await discoverCommands<"path">({
+        env,
+        platform: "win32",
+        fixedCandidates: [],
+        autoCandidates: [{ command: "wintool", source: "path" }],
+        versionArgs: ["--version", dangerousArgument],
+        parseVersion: parseSimpleVersion,
+      });
+
+      expect(snapshot.selectedCommand).toBe(cmdShim);
+      expect(snapshot.candidates[0]?.version).toBe("2.0.0");
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
     }
   });
 });

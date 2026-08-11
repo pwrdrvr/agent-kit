@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import path from "node:path";
 import {
   collectCodexStatus,
@@ -7,7 +7,13 @@ import {
   parseCodexLoginPrompt,
   CodexLoginManager,
 } from "../src/index";
-import { makeTempDir, writeFakeCodex, makeFakeJwt, writeAuthJson } from "./helpers";
+import {
+  makeTempDir,
+  writeFakeCodex,
+  writeFakeWindowsCodex,
+  makeFakeJwt,
+  writeAuthJson,
+} from "./helpers";
 
 const isWindows = process.platform === "win32";
 
@@ -221,6 +227,55 @@ sleep 30
       manager.dispose(); // kill the lingering sleeper child
       rmSync(binDir, { recursive: true, force: true });
       rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.runIf(isWindows)("Windows .cmd auth launches", () => {
+  it("collects status through an npm-style codex.cmd", async () => {
+    const rootDir = makeTempDir("codex-login-win-");
+    const shimDir = path.join(rootDir, "NVM & npm");
+    const codexHome = path.join(rootDir, "codex home");
+    try {
+      mkdirSync(shimDir, { recursive: true });
+      mkdirSync(codexHome, { recursive: true });
+      writeFileSync(path.join(codexHome, "logged-in"), "", "utf8");
+      const codex = writeFakeWindowsCodex({ dir: shimDir });
+
+      const result = await collectCodexStatus(codex, codexHome);
+
+      expect(result.code).toBe(0);
+      expect(result.detail).toContain("Logged in as test@example.com");
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it("starts login through an npm-style codex.cmd and opens its OAuth URL", async () => {
+    const rootDir = makeTempDir("codex-login-win-");
+    const shimDir = path.join(rootDir, "NVM & npm");
+    const codexHome = path.join(rootDir, "codex home");
+    const openExternal = vi.fn(async () => {});
+    const manager = new CodexLoginManager({ openExternal });
+    try {
+      mkdirSync(shimDir, { recursive: true });
+      mkdirSync(codexHome, { recursive: true });
+      const codex = writeFakeWindowsCodex({ dir: shimDir });
+
+      const result = await manager.startProfileLogin({
+        command: codex,
+        codexHome,
+        profile: "work",
+      });
+
+      expect(result.started).toBe(true);
+      expect(result.loginUrl).toMatch(
+        /^https:\/\/auth\.openai\.com\/oauth\/authorize/,
+      );
+      expect(openExternal).toHaveBeenCalledWith(result.loginUrl);
+    } finally {
+      manager.dispose();
+      rmSync(rootDir, { recursive: true, force: true });
     }
   });
 });

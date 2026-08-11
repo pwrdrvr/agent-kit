@@ -20,6 +20,7 @@ import {
   noopLogger,
   type OpenExternal,
 } from "@pwrdrvr/agent-core";
+import { createCommandInvocation } from "./command-launch";
 import { readCodexAuthInfo } from "./codex-profiles";
 import type {
   CodexAuthStatusResponse,
@@ -37,12 +38,20 @@ export function collectCodexStatus(
   codexHome: string,
 ): Promise<{ code: number | null; detail: string }> {
   return new Promise((resolve) => {
-    const child = spawn(command, ["login", "status"], {
-      env: {
-        ...process.env,
-        CODEX_HOME: codexHome,
-      },
+    const env = {
+      ...process.env,
+      CODEX_HOME: codexHome,
+    };
+    const invocation = createCommandInvocation({
+      command,
+      args: ["login", "status"],
+      env,
+    });
+    const child = spawn(invocation.command, invocation.args, {
+      env,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     });
     let output = "";
     child.stdout.setEncoding("utf8");
@@ -144,12 +153,20 @@ export class CodexLoginManager {
   ): Promise<CodexProfileLoginResponse> {
     this.activeLoginProcesses.get(params.profile)?.kill();
     return new Promise((resolve, reject) => {
-      const child = spawn(params.command, ["login"], {
-        env: {
-          ...process.env,
-          CODEX_HOME: params.codexHome,
-        },
+      const env = {
+        ...process.env,
+        CODEX_HOME: params.codexHome,
+      };
+      const invocation = createCommandInvocation({
+        command: params.command,
+        args: ["login"],
+        env,
+      });
+      const child = spawn(invocation.command, invocation.args, {
+        env,
         stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       });
       this.activeLoginProcesses.set(params.profile, child);
 
