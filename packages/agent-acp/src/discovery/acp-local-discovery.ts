@@ -18,7 +18,10 @@ import { readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { prependCommandDirToPath } from "@pwrdrvr/agent-transport";
+import {
+  createCommandInvocation,
+  prependCommandDirToPath
+} from "@pwrdrvr/agent-transport";
 import { BUILT_IN_ACP_STRATEGIES } from "../strategies/index";
 import type {
   AcpAgentStrategy,
@@ -238,17 +241,21 @@ function candidateCommands(
 
 /** Resolve symlinks so the same binary reached via two PATH entries dedupes. */
 function canonicalize(command: string): string {
-  if (!path.isAbsolute(command)) return command;
+  if (!path.isAbsolute(command)) {
+    return process.platform === "win32" ? command.toLowerCase() : command;
+  }
   try {
-    return realpathSync(command);
+    const canonical = realpathSync(command);
+    return process.platform === "win32" ? canonical.toLowerCase() : canonical;
   } catch {
-    return command;
+    return process.platform === "win32" ? command.toLowerCase() : command;
   }
 }
 
 /** Default executable lister: scan `env.PATH` AND well-known version-manager /
- *  install dirs for an executable file named `command`. POSIX only (Windows
- *  returns none).
+ *  install dirs for an executable file named `command`. On Windows, expand
+ *  each PATH entry using PATHEXT and return the actual .COM/.EXE/.BAT/.CMD
+ *  candidates rather than a bare command that `execFile` cannot launch.
  *
  *  Scanning beyond `PATH` is deliberate: a desktop app launched from Finder /
  *  Dock inherits launchd's minimal `PATH`, and login-shell hydration can't
@@ -257,33 +264,69 @@ function canonicalize(command: string): string {
  *  under). So an `npm i -g qwen` under nvm would be invisible. We find it by
  *  scanning the version-manager bin dirs directly. */
 function defaultListExecutables(command: string, env: NodeJS.ProcessEnv): string[] {
-  if (process.platform === "win32") return [];
   // A bare command name only — never enumerate when a path was passed.
-  if (command.includes(path.sep)) return [];
+  if (command.includes("/") || command.includes("\\")) return [];
   const found: string[] = [];
   const seenDir = new Set<string>();
   for (const dir of discoveryDirs(env)) {
-    if (dir.length === 0 || seenDir.has(dir)) continue;
-    seenDir.add(dir);
-    const candidate = path.join(dir, command);
-    try {
-      const stat = statSync(candidate);
-      if (stat.isFile() && (stat.mode & 0o111) !== 0) {
-        found.push(candidate);
+    const normalizedDir = normalizePathEntry(dir);
+    const dirKey = process.platform === "win32" ? normalizedDir.toLowerCase() : normalizedDir;
+    if (normalizedDir.length === 0 || seenDir.has(dirKey)) continue;
+    seenDir.add(dirKey);
+    for (const commandName of executableCommandNames(command, env)) {
+      const candidate = path.join(normalizedDir, commandName);
+      try {
+        const stat = statSync(candidate);
+        if (stat.isFile() && (process.platform === "win32" || (stat.mode & 0o111) !== 0)) {
+          found.push(candidate);
+        }
+      } catch {
+        // Not in this dir; keep scanning.
       }
-    } catch {
-      // Not in this dir; keep scanning.
     }
   }
   return found;
+}
+
+function executableCommandNames(command: string, env: NodeJS.ProcessEnv): string[] {
+  if (process.platform !== "win32") return [command];
+  const extensions = (readWindowsEnv(env, "PATHEXT")?.trim() || ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter(Boolean)
+    .map((extension) => extension.startsWith(".") ? extension : `.${extension}`);
+  const commandExtension = path.win32.extname(command);
+  if (
+    commandExtension.length > 0 &&
+    extensions.some((extension) => extension.toLowerCase() === commandExtension.toLowerCase())
+  ) {
+    return [command];
+  }
+  return extensions.map((extension) => `${command}${extension}`);
+}
+
+function readWindowsEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+  return key ? env[key] : undefined;
+}
+
+function normalizePathEntry(entry: string): string {
+  const trimmed = entry.trim();
+  const quoted = trimmed.match(/^"(.*)"$/);
+  return quoted?.[1] ?? trimmed;
 }
 
 /** Dirs to scan for agent executables: every `env.PATH` entry first, then the
  *  well-known version-manager / package-manager bin dirs a GUI app's `PATH`
  *  usually omits. */
 function discoveryDirs(env: NodeJS.ProcessEnv): string[] {
-  const pathValue = env.PATH ?? env.Path ?? "";
-  return [...pathValue.split(path.delimiter), ...wellKnownAgentBinDirs(homedir())];
+  const pathValue = process.platform === "win32"
+    ? readWindowsEnv(env, "PATH") ?? ""
+    : env.PATH ?? "";
+  const pathDirs = pathValue.split(path.delimiter);
+  return process.platform === "win32"
+    ? pathDirs
+    : [...pathDirs, ...wellKnownAgentBinDirs(homedir())];
 }
 
 /** Well-known bin dirs where a CLI installed via a node/JS version manager or
@@ -333,12 +376,15 @@ function ensureArgs(args: string[], ensure: string[] | undefined): string[] {
 
 function makeDefaultProbe(env: NodeJS.ProcessEnv): LocalAcpAgentProbe {
   return async (command: string, args: string[]): Promise<LocalAcpProbeResult> => {
-    return await execFile(command, args, {
+    const launchEnv = prependCommandDirToPath(command, env);
+    const invocation = createCommandInvocation({ command, args, env: launchEnv });
+    return await execFile(invocation.command, invocation.args, {
       timeout: 5_000,
       maxBuffer: 1024 * 1024,
       // Prepend the candidate's own dir so a node-script CLI (e.g. an nvm-
       // installed `qwen`) finds its sibling `node` during the probe.
-      env: prependCommandDirToPath(command, env)
+      env: launchEnv,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments
     });
   };
 }

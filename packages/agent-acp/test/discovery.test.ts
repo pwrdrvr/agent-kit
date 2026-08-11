@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -8,7 +9,7 @@ import {
   type AcpPathExecutableLister,
   type LocalAcpAgentProbe
 } from "../src/discovery/acp-local-discovery";
-import { BUILT_IN_ACP_STRATEGIES } from "../src/strategies/index";
+import { BUILT_IN_ACP_STRATEGIES, qwenStrategy } from "../src/strategies/index";
 import {
   buildAcpBackendId,
   defaultQuirks,
@@ -235,6 +236,91 @@ describe("default executable lister — version-manager dirs", () => {
       if (prevHome === undefined) delete process.env.HOME;
       else process.env.HOME = prevHome;
     }
+  });
+
+  describe.runIf(process.platform === "win32")("Windows PATH/PATHEXT", () => {
+    it("returns every actual PATHEXT candidate in PATH order with canonical deduplication", async () => {
+      const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+      const os = await import("node:os");
+      const nodePath = await import("node:path");
+      const root = mkdtempSync(nodePath.join(os.tmpdir(), "agent-acp-pathext-"));
+      const bin = nodePath.join(root, "ACP tools");
+      mkdirSync(bin, { recursive: true });
+      const candidates = [".COM", ".EXE", ".BAT", ".CMD"].map((extension) =>
+        nodePath.join(bin, `qwen${extension}`)
+      );
+      for (const candidate of candidates) writeFileSync(candidate, "fixture", "utf8");
+      const installed = Object.fromEntries(candidates.map((candidate, index) => [
+        candidate,
+        { version: `1.0.${index}`, help: "flags: --acp" }
+      ]));
+
+      try {
+        const groups = await discoverLocalAcpAgentInstances({
+          probe: scriptedProbe(installed),
+          env: {
+            Path: `"${bin}";"${bin.toUpperCase()}"`,
+            Pathext: ".COM;EXE;.BAT;CMD"
+          },
+          strategies: [qwenStrategy]
+        });
+        expect(groups[0]?.instances.map((instance) => instance.command.toLowerCase())).toEqual(
+          candidates.map((candidate) => candidate.toLowerCase())
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("discovers an npm-style .cmd in a metacharacter path without evaluating probe args", async () => {
+      const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+      const os = await import("node:os");
+      const nodePath = await import("node:path");
+      const root = mkdtempSync(nodePath.join(os.tmpdir(), "agent-acp-shim-"));
+      const bin = nodePath.join(root, "ACP & shims");
+      const marker = nodePath.join(root, "injected.txt");
+      const script = nodePath.join(bin, "qwen.cjs");
+      const shim = nodePath.join(bin, "qwen.cmd");
+      const dangerousArgument = `probe & echo injected>"${marker}"`;
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(script, `
+const args = process.argv.slice(2);
+if (args[0] === "--version" && args[1] === process.env.EXPECTED_PROBE_ARG) {
+  console.log("qwen 2.3.4");
+  process.exit(0);
+}
+if (args[0] === "--help") {
+  console.log("flags: --acp");
+  process.exit(0);
+}
+process.exit(2);
+`, "utf8");
+      writeFileSync(shim, `@ECHO off\nSETLOCAL\nnode "%~dp0\\qwen.cjs" %*\n`, "utf8");
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === "path") delete env[key];
+      }
+      env.Path = `${bin};${nodePath.dirname(process.execPath)}`;
+      env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+      env.EXPECTED_PROBE_ARG = dangerousArgument;
+      const strategy: AcpAgentStrategy = {
+        ...qwenStrategy,
+        discoveryProbe: {
+          ...qwenStrategy.discoveryProbe,
+          versionArgs: ["--version", dangerousArgument]
+        }
+      };
+
+      try {
+        const groups = await discoverLocalAcpAgentInstances({ env, strategies: [strategy] });
+        expect(groups[0]?.instances).toEqual([
+          { command: shim, version: "2.3.4", source: "path" }
+        ]);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 });
 

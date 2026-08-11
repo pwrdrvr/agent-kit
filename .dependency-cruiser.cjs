@@ -6,7 +6,7 @@
 //                           (no node: builtins) because agent-chat-react
 //                           bundles it into a renderer.
 //   agent-transport       → agent-core            (node-only plumbing)
-//   codex-discovery       → agent-core            (node-only)
+//   codex-discovery       → agent-core, agent-transport
 //   agent-acp             → agent-core, agent-transport
 //   agent-client          → agent-core, agent-transport, codex-discovery
 //   agent-chat-react      → agent-core            (renderer; BROWSER-SAFE)
@@ -75,9 +75,9 @@ module.exports = {
     {
       name: "codex-discovery-imports-core-only",
       severity: "error",
-      comment: "codex-discovery may only depend on agent-core.",
+      comment: "codex-discovery may only depend on agent-core + agent-transport.",
       from: { path: "^packages/codex-discovery/src" },
-      to: { path: "@pwrdrvr/(?!agent-core|codex-discovery)" }
+      to: { path: "@pwrdrvr/(?!agent-core|agent-transport|codex-discovery)" }
     },
     {
       name: "agent-acp-layer",

@@ -20,7 +20,7 @@ import {
   noopLogger,
   type OpenExternal,
 } from "@pwrdrvr/agent-core";
-import { createCommandInvocation } from "./command-launch";
+import { createCommandInvocation } from "@pwrdrvr/agent-transport";
 import { readCodexAuthInfo } from "./codex-profiles";
 import type {
   CodexAuthStatusResponse,

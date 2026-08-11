@@ -24,7 +24,11 @@ import {
   type SessionNotification
 } from "@agentclientprotocol/sdk";
 import { noopLogger, type Logger } from "@pwrdrvr/agent-core";
-import type { JsonRpcId } from "@pwrdrvr/agent-transport";
+import {
+  createCommandInvocation,
+  prependCommandDirToPath,
+  type JsonRpcId
+} from "@pwrdrvr/agent-transport";
 import type { AcpJsonRpcTransport } from "./acp-transport";
 
 /** The subset of the library's client→agent surface that `AcpConnection`
@@ -135,9 +139,12 @@ export class AcpConnection implements AcpJsonRpcTransport {
     const { command, args, env } = this.options;
     const logger = this.logger;
     return (client) => {
-      const child = spawn(command, args, {
+      const launchEnv = prependCommandDirToPath(command, env ?? process.env);
+      const invocation = createCommandInvocation({ command, args, env: launchEnv });
+      const child = spawn(invocation.command, invocation.args, {
         stdio: ["pipe", "pipe", "pipe"],
-        ...(env !== undefined ? { env } : {})
+        env: launchEnv,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments
       });
       child.on("error", (error: Error) => {
         logger.error("acp agent process error", { command, message: error.message });
