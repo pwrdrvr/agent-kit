@@ -1,5 +1,11 @@
 # @pwrdrvr/agent-transport
 
+## 0.1.7
+
+### Patch Changes
+
+- f1e21eb: Discover Windows ACP agents through real PATH/PATHEXT candidates and launch `.cmd`/`.bat` shims safely through a shared ComSpec invocation for discovery, ACP connections, and generic stdio transports.
+
 ## 0.1.6
 
 ### Patch Changes
