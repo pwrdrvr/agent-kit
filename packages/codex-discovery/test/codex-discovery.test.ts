@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   discoverCodexCommands,
@@ -224,6 +224,49 @@ describe.skipIf(isWindows)("resolveCodexCommand", () => {
       expect(path.basename(resolved.command)).toBe("codex");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.runIf(isWindows)("resolveCodexCommand (.cmd shim)", () => {
+  it("resolves and probes a configured npm-style codex.cmd through the real launch path", async () => {
+    const rootDir = makeTempDir("codex-discovery-win-");
+    const shimDir = path.join(rootDir, "NVM & npm");
+    try {
+      mkdirSync(shimDir, { recursive: true });
+      const codexScript = path.join(shimDir, "codex.js");
+      const codexShim = path.join(shimDir, "codex.cmd");
+      writeFileSync(
+        codexScript,
+        `if (process.argv[2] === "--version") console.log("codex-cli 0.140.0");\n`,
+        "utf8",
+      );
+      writeFileSync(
+        codexShim,
+        `@ECHO off\nSETLOCAL\nnode "%~dp0\\codex.js" %*\n`,
+        "utf8",
+      );
+
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (key.toLowerCase() === "path") delete env[key];
+      }
+      env.Path = `${shimDir};${path.dirname(process.execPath)}`;
+      env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+
+      const resolved = await resolveCodexCommand({
+        command: codexShim,
+        env,
+        platform: "win32",
+      });
+
+      expect(resolved).toEqual({
+        command: codexShim,
+        source: "config",
+        version: "0.140.0",
+      });
+    } finally {
+      rmSync(rootDir, { recursive: true, force: true });
     }
   });
 });

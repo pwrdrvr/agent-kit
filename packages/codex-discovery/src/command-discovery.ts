@@ -11,6 +11,7 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { createCommandInvocation } from "./command-launch";
 
 const execFile = promisify(execFileCallback);
 
@@ -177,6 +178,7 @@ async function resolvePathCommand(
 async function readCommandVersion(params: {
   command: string;
   env: NodeJS.ProcessEnv;
+  platform: NodeJS.Platform;
   parseVersion: (output: string) => string | undefined;
   versionArgs: string[];
 }): Promise<{
@@ -185,9 +187,17 @@ async function readCommandVersion(params: {
   failureReason?: string | undefined;
 }> {
   try {
-    const result = await execFile(params.command, params.versionArgs, {
+    const invocation = createCommandInvocation({
+      command: params.command,
+      args: params.versionArgs,
+      env: params.env,
+      platform: params.platform,
+    });
+    const result = await execFile(invocation.command, invocation.args, {
       env: params.env,
       timeout: 2_000,
+      windowsHide: true,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     });
     const output = `${result.stdout}\n${result.stderr ?? ""}`;
     const version = params.parseVersion(output);
@@ -274,6 +284,7 @@ export async function buildCommandDiscoveryCandidate<Source extends string>(
       : await readCommandVersion({
           command: probeCommand,
           env: options.env,
+          platform,
           parseVersion: options.parseVersion,
           versionArgs: options.versionArgs ?? ["--version"],
         })
