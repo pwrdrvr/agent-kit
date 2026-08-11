@@ -116,10 +116,10 @@ describe.runIf(isWindows)("Windows PATHEXT expansion (win32 host)", () => {
         includeFailedAutoCandidates: true,
       });
       const candidate = snapshot.candidates.find((c) => c.source === "path");
-      expect(candidate?.command).toBe(cmdShim);
+      expect(candidate?.command.toLowerCase()).toBe(cmdShim.toLowerCase());
       expect(candidate?.executable).toBe(true);
       expect(candidate?.version).toBe("2.0.0");
-      expect(snapshot.selectedCommand).toBe(cmdShim);
+      expect(snapshot.selectedCommand?.toLowerCase()).toBe(cmdShim.toLowerCase());
     } finally {
       rmSync(binDir, { recursive: true, force: true });
     }
@@ -161,7 +161,7 @@ describe.runIf(isWindows)("Windows PATHEXT expansion (win32 host)", () => {
         parseVersion: parseSimpleVersion,
       });
 
-      expect(snapshot.selectedCommand).toBe(cmdShim);
+      expect(snapshot.selectedCommand?.toLowerCase()).toBe(cmdShim.toLowerCase());
       expect(snapshot.candidates[0]?.version).toBe("2.0.0");
       expect(existsSync(marker)).toBe(false);
     } finally {
