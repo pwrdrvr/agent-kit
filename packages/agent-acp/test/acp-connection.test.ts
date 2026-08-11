@@ -1,3 +1,6 @@
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Client } from "@agentclientprotocol/sdk";
 import { AcpConnection, type AcpAgentConnection } from "../src/acp-connection";
@@ -175,5 +178,63 @@ describe("AcpConnection — bridges agent→client traffic to onNotification/onR
     await expect(client().requestPermission({ sessionId: "sess-1" } as never)).rejects.toThrow(
       /request handler unavailable/
     );
+  });
+});
+
+describe.runIf(process.platform === "win32")("AcpConnection — Windows batch shim", () => {
+  it("initializes over real ACP stdio without evaluating launch arguments", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "agent-acp-connection-win-"));
+    const bin = path.join(root, "ACP & shims");
+    const marker = path.join(root, "injected.txt");
+    const script = path.join(bin, "fixture-agent.cjs");
+    const shim = path.join(bin, "fixture-agent.cmd");
+    const dangerousArgument = `acp & echo injected>"${marker}"`;
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(script, `
+const readline = require("node:readline");
+const launchArg = process.argv[2];
+const firstPathDir = (process.env.Path || process.env.PATH || "").split(";")[0];
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method !== "initialize") return;
+  process.stdout.write(JSON.stringify({
+    jsonrpc: "2.0",
+    id: message.id,
+    result: {
+      protocolVersion: message.params.protocolVersion,
+      agentCapabilities: { loadSession: false },
+      agentInfo: { name: "fixture-agent", version: launchArg, title: firstPathDir }
+    }
+  }) + "\\n");
+});
+`, "utf8");
+    writeFileSync(
+      shim,
+      `@ECHO off\nSETLOCAL\nnode "%~dp0\\fixture-agent.cjs" %*\n`,
+      "utf8"
+    );
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === "path") delete env[key];
+    }
+    env.Path = path.dirname(process.execPath);
+    const acp = new AcpConnection({ command: shim, args: [dangerousArgument], env });
+
+    try {
+      const result = await acp.request("initialize", {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: "agent-kit-test", version: "1.0.0" }
+      });
+      expect(result).toMatchObject({
+        protocolVersion: 1,
+        agentInfo: { name: "fixture-agent", version: dangerousArgument, title: bin }
+      });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      await acp.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

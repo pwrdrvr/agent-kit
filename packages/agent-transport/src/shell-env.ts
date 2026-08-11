@@ -72,9 +72,17 @@ export function prependCommandDirToPath(
 ): NodeJS.ProcessEnv {
   if (!path.isAbsolute(command)) return env;
   const dir = path.dirname(command);
-  const key = env.Path !== undefined && env.PATH === undefined ? "Path" : "PATH";
+  const windowsPathKey = process.platform === "win32"
+    ? Object.keys(env).find((candidate) => candidate.toLowerCase() === "path")
+    : undefined;
+  const key = windowsPathKey ?? "PATH";
   const current = env[key] ?? "";
-  if (current.split(path.delimiter).includes(dir)) return env;
+  const includesDir = current.split(path.delimiter).some((entry) =>
+    process.platform === "win32"
+      ? entry.toLowerCase() === dir.toLowerCase()
+      : entry === dir
+  );
+  if (includesDir) return env;
   return {
     ...env,
     [key]: current.length > 0 ? dir + path.delimiter + current : dir

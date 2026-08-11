@@ -6,6 +6,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import { type Logger, noopLogger } from "@pwrdrvr/agent-core";
+import { createCommandInvocation } from "./command-launch";
 import type { JsonRpcTransport } from "./json-rpc";
 import { prependCommandDirToPath } from "./shell-env";
 
@@ -46,14 +47,20 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
     // GUI app's minimal PATH.
     const env = prependCommandDirToPath(this.options.command, this.options.env ?? process.env);
     const args = this.options.args ?? [];
+    const invocation = createCommandInvocation({
+      command: this.options.command,
+      args,
+      env
+    });
     this.logger.info("agent-transport launch", {
       command: this.options.command,
       args: args.join(" ")
     });
 
-    const child = spawn(this.options.command, args, {
+    const child = spawn(invocation.command, invocation.args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env
+      env,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments
     });
 
     if (!child.stdin || !child.stdout || !child.stderr) {

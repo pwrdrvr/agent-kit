@@ -23,7 +23,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@pwrdrvr/agent-core": "workspace:^"
+    "@pwrdrvr/agent-core": "workspace:^",
+    "@pwrdrvr/agent-transport": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^24.0.0"

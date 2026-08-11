@@ -137,6 +137,9 @@ importers:
       '@pwrdrvr/agent-core':
         specifier: workspace:^
         version: link:../agent-core
+      '@pwrdrvr/agent-transport':
+        specifier: workspace:^
+        version: link:../agent-transport
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

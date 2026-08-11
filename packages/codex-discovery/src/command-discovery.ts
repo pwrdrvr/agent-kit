@@ -11,7 +11,7 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { createCommandInvocation } from "./command-launch";
+import { createCommandInvocation } from "@pwrdrvr/agent-transport";
 
 const execFile = promisify(execFileCallback);
 

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   mergeLoginShellEnvIntoEnv,
@@ -7,11 +8,14 @@ import {
 
 describe("prependCommandDirToPath", () => {
   it("prepends an absolute command's dir so its sibling node resolves", () => {
+    const command = path.resolve("fixture", "nvm", "bin", "qwen");
+    const commandDir = path.dirname(command);
+    const systemDir = path.resolve("fixture", "system-bin");
     const out = prependCommandDirToPath(
-      "/Users/me/.nvm/versions/node/v24.16.0/bin/qwen",
-      { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv
+      command,
+      { PATH: systemDir } as NodeJS.ProcessEnv
     );
-    expect(out.PATH).toBe("/Users/me/.nvm/versions/node/v24.16.0/bin:/usr/bin:/bin");
+    expect(out.PATH).toBe(`${commandDir}${path.delimiter}${systemDir}`);
   });
 
   it("is a no-op for a bare command name", () => {
@@ -20,13 +24,16 @@ describe("prependCommandDirToPath", () => {
   });
 
   it("does not duplicate a dir already on PATH", () => {
-    const env = { PATH: "/opt/homebrew/bin:/usr/bin" } as NodeJS.ProcessEnv;
-    expect(prependCommandDirToPath("/opt/homebrew/bin/qwen", env)).toBe(env);
+    const command = path.resolve("fixture", "tools", "qwen");
+    const commandDir = path.dirname(command);
+    const env = { PATH: `${commandDir}${path.delimiter}${path.resolve("fixture", "bin")}` };
+    expect(prependCommandDirToPath(command, env)).toBe(env);
   });
 
   it("sets PATH to just the dir when there was none", () => {
-    const out = prependCommandDirToPath("/opt/tools/grok", {} as NodeJS.ProcessEnv);
-    expect(out.PATH).toBe("/opt/tools");
+    const command = path.resolve("fixture", "tools", "grok");
+    const out = prependCommandDirToPath(command, {} as NodeJS.ProcessEnv);
+    expect(out.PATH).toBe(path.dirname(command));
   });
 });
 

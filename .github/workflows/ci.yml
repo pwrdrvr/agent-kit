@@ -52,7 +52,7 @@ jobs:
       - name: Test
         run: pnpm test
 
-  codex-discovery-windows:
+  windows-command-shims:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,10 +70,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: pnpm --filter @pwrdrvr/codex-discovery... build
+        run: pnpm --filter @pwrdrvr/agent-acp... --filter @pwrdrvr/codex-discovery... build
 
       - name: Typecheck
-        run: pnpm --filter @pwrdrvr/codex-discovery typecheck
+        run: pnpm --filter @pwrdrvr/agent-transport --filter @pwrdrvr/agent-acp --filter @pwrdrvr/codex-discovery typecheck
 
       - name: Test
-        run: pnpm --filter @pwrdrvr/codex-discovery test
+        run: pnpm --filter @pwrdrvr/agent-transport --filter @pwrdrvr/agent-acp --filter @pwrdrvr/codex-discovery test

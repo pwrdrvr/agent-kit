@@ -20,6 +20,11 @@ export {
 } from "./stdio-transport";
 
 export {
+  createCommandInvocation,
+  type CommandInvocation
+} from "./command-launch";
+
+export {
   hydrateProcessEnvFromLoginShell,
   mergeLoginShellEnvIntoEnv,
   resolveInteractiveLoginShellEnv,

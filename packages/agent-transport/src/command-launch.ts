@@ -11,23 +11,31 @@ export type CommandInvocation = {
 
 function readWindowsEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
   const key = Object.keys(env).find(
-    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+    (candidate) => candidate.toLowerCase() === name.toLowerCase()
   );
   return key ? env[key] : undefined;
 }
 
+function assertSingleWindowsCommandLine(value: string, label: string): void {
+  if (/[\r\n\0]/.test(value)) {
+    throw new TypeError(`${label} contains a character that cannot be passed safely to cmd.exe`);
+  }
+}
+
 function escapeWindowsCmdCommand(command: string): string {
+  assertSingleWindowsCommandLine(command, "command");
   return command.replace(WINDOWS_CMD_META_CHARACTERS, "^$1");
 }
 
 function escapeWindowsCmdArgument(argument: string): string {
+  assertSingleWindowsCommandLine(argument, "argument");
   // cmd.exe receives one command string after /c, so preserve the argument
   // boundary explicitly and escape both Windows argv quoting and cmd metacharacters.
   // This is the same non-backtracking quoting strategy used by cross-spawn.
   const escapedQuotes = argument.replace(/(?=(\\+?)?)\1"/g, "$1$1\\\"");
   const escapedTrailingSlashes = escapedQuotes.replace(
     /(?=(\\+?)?)\1$/,
-    "$1$1",
+    "$1$1"
   );
   return `"${escapedTrailingSlashes}"`.replace(WINDOWS_CMD_META_CHARACTERS, "^$1");
 }
@@ -45,8 +53,8 @@ export function createCommandInvocation(params: {
 }): CommandInvocation {
   const platform = params.platform ?? process.platform;
   if (
-    platform !== "win32"
-    || !WINDOWS_BATCH_EXTENSION.test(path.win32.extname(params.command))
+    platform !== "win32" ||
+    !WINDOWS_BATCH_EXTENSION.test(path.win32.extname(params.command))
   ) {
     return { command: params.command, args: params.args };
   }
@@ -55,15 +63,15 @@ export function createCommandInvocation(params: {
   // would interpolate the command and args without an explicit safety boundary.
   const shellCommand = [
     escapeWindowsCmdCommand(path.win32.normalize(params.command)),
-    ...params.args.map(escapeWindowsCmdArgument),
+    ...params.args.map(escapeWindowsCmdArgument)
   ].join(" ");
 
   return {
     command:
-      readWindowsEnv(params.env, "ComSpec")?.trim()
-      || readWindowsEnv(process.env, "ComSpec")?.trim()
-      || "cmd.exe",
+      readWindowsEnv(params.env, "ComSpec")?.trim() ||
+      readWindowsEnv(process.env, "ComSpec")?.trim() ||
+      "cmd.exe",
     args: ["/d", "/s", "/c", `"${shellCommand}"`],
-    windowsVerbatimArguments: true,
+    windowsVerbatimArguments: true
   };
 }
