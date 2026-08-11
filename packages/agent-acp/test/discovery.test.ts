@@ -202,41 +202,44 @@ describe("default executable lister — version-manager dirs", () => {
     expect(dirs).toContain("/opt/homebrew/bin");
   });
 
-  it("discovers an agent installed under an nvm node version that is NOT on PATH", async () => {
-    const { mkdtempSync, mkdirSync, writeFileSync, chmodSync } = await import(
-      "node:fs"
-    );
-    const os = await import("node:os");
-    const nodePath = await import("node:path");
-    const home = mkdtempSync(nodePath.join(os.tmpdir(), "agentkit-nvm-"));
-    const bin = nodePath.join(home, ".nvm", "versions", "node", "v24.16.0", "bin");
-    mkdirSync(bin, { recursive: true });
-    const qwenBin = nodePath.join(bin, "qwen");
-    writeFileSync(qwenBin, "#!/bin/sh\n");
-    chmodSync(qwenBin, 0o755);
+  it.skipIf(process.platform === "win32")(
+    "discovers an agent installed under an nvm node version that is NOT on PATH",
+    async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, chmodSync } = await import(
+        "node:fs"
+      );
+      const os = await import("node:os");
+      const nodePath = await import("node:path");
+      const home = mkdtempSync(nodePath.join(os.tmpdir(), "agentkit-nvm-"));
+      const bin = nodePath.join(home, ".nvm", "versions", "node", "v24.16.0", "bin");
+      mkdirSync(bin, { recursive: true });
+      const qwenBin = nodePath.join(bin, "qwen");
+      writeFileSync(qwenBin, "#!/bin/sh\n");
+      chmodSync(qwenBin, 0o755);
 
-    // PATH is launchd-minimal (no nvm) — the default lister must still find it
-    // via the nvm scan. Probe scripted to accept exactly that resolved path.
-    const probe = scriptedProbe({
-      [qwenBin]: { version: "0.16.1", help: "flags: --acp run ACP server" }
-    });
-    const prevHome = process.env.HOME;
-    process.env.HOME = home;
-    try {
-      const groups = await discoverLocalAcpAgentInstances({
-        probe,
-        env: { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv
-        // NOTE: real default lister (no listExecutables override) — exercises the nvm scan.
+      // PATH is launchd-minimal (no nvm) — the default lister must still find it
+      // via the nvm scan. Probe scripted to accept exactly that resolved path.
+      const probe = scriptedProbe({
+        [qwenBin]: { version: "0.16.1", help: "flags: --acp run ACP server" }
       });
-      const qwen = groups.find((g) => g.strategyId === "qwen");
-      expect(qwen?.instances).toEqual([
-        { command: qwenBin, version: "0.16.1", source: "path" }
-      ]);
-    } finally {
-      if (prevHome === undefined) delete process.env.HOME;
-      else process.env.HOME = prevHome;
+      const prevHome = process.env.HOME;
+      process.env.HOME = home;
+      try {
+        const groups = await discoverLocalAcpAgentInstances({
+          probe,
+          env: { PATH: "/usr/bin:/bin" } as NodeJS.ProcessEnv
+          // NOTE: real default lister (no listExecutables override) — exercises the nvm scan.
+        });
+        const qwen = groups.find((g) => g.strategyId === "qwen");
+        expect(qwen?.instances).toEqual([
+          { command: qwenBin, version: "0.16.1", source: "path" }
+        ]);
+      } finally {
+        if (prevHome === undefined) delete process.env.HOME;
+        else process.env.HOME = prevHome;
+      }
     }
-  });
+  );
 
   describe.runIf(process.platform === "win32")("Windows PATH/PATHEXT", () => {
     it("returns every actual PATHEXT candidate in PATH order with canonical deduplication", async () => {
@@ -313,9 +316,12 @@ process.exit(2);
 
       try {
         const groups = await discoverLocalAcpAgentInstances({ env, strategies: [strategy] });
-        expect(groups[0]?.instances).toEqual([
-          { command: shim, version: "2.3.4", source: "path" }
-        ]);
+        expect(groups[0]?.instances).toHaveLength(1);
+        expect(groups[0]?.instances[0]).toMatchObject({
+          version: "2.3.4",
+          source: "path"
+        });
+        expect(groups[0]?.instances[0]?.command.toLowerCase()).toBe(shim.toLowerCase());
         expect(existsSync(marker)).toBe(false);
       } finally {
         rmSync(root, { recursive: true, force: true });
