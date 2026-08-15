@@ -7,6 +7,8 @@
 //     each agent (each executable on `PATH` + the strategy's fallback paths +
 //     an optional override that passes the probe), with its parsed version and
 //     where it was found. A host UI can list them all and let the user pick.
+//     Hosts that opt in can also receive detected candidates rejected by the
+//     probe, so they can explain why a known CLI cannot be used.
 //   • `discoverLocalAcpAgents` — the original first-match-per-agent view, kept
 //     for back-compat. Implemented on top of the instance view.
 //
@@ -47,6 +49,16 @@ export type DiscoveredAcpAgentInstance = {
   source: AcpAgentInstanceSource;
 };
 
+/** A detected executable that did not satisfy a strategy's discovery probe.
+ *  It is diagnostic-only: hosts must never use it to launch an ACP session. */
+export type RejectedAcpAgentInstance = {
+  command: string;
+  /** Parsed from successful `--version` output when available. */
+  version?: string;
+  source: AcpAgentInstanceSource;
+  reason: "version-probe-failed" | "acp-probe-failed" | "acp-help-mismatch";
+};
+
 /** Every installed instance of one agent found on this machine. */
 export type DiscoveredAcpAgentGroup = {
   strategyId: string;
@@ -58,6 +70,9 @@ export type DiscoveredAcpAgentGroup = {
   env: Record<string, string>;
   /** All instances that passed the probe, in candidate order (override → PATH → fallback). */
   instances: DiscoveredAcpAgentInstance[];
+  /** Detected candidates that failed the version or ACP-capability probe. Only
+   *  populated when `includeRejectedCandidates` is enabled. */
+  rejectedInstances?: RejectedAcpAgentInstance[];
   discoveredAt: number;
 };
 
@@ -93,12 +108,16 @@ export type LocalAcpDiscoveryOptions = {
   env?: NodeJS.ProcessEnv;
   /** Injectable `PATH` executable lister (real-fs scan by default). */
   listExecutables?: AcpPathExecutableLister;
+  /** Include candidates known to exist but rejected by a discovery probe.
+   *  Defaults false to preserve the legacy installed-only result. */
+  includeRejectedCandidates?: boolean;
 };
 
 /**
  * Discover every installed instance of each agent (all `PATH` matches +
  * fallbacks + override that pass the probe), grouped per strategy. Groups with
- * no passing instance are omitted.
+ * no passing instance are omitted unless `includeRejectedCandidates` is true
+ * and a detected candidate failed a probe.
  */
 export async function discoverLocalAcpAgentInstances(
   options: LocalAcpDiscoveryOptions = {}
@@ -116,7 +135,8 @@ export async function discoverLocalAcpAgentInstances(
         now,
         env,
         listExecutables,
-        options.overrides?.[strategy.id]
+        options.overrides?.[strategy.id],
+        options.includeRejectedCandidates === true
       )
     )
   );
@@ -154,16 +174,28 @@ async function discoverStrategyInstances(
   now: () => number,
   env: NodeJS.ProcessEnv,
   listExecutables: AcpPathExecutableLister,
-  override?: string
+  override?: string,
+  includeRejectedCandidates = false
 ): Promise<DiscoveredAcpAgentGroup | undefined> {
   const candidates = candidateCommands(strategy, env, listExecutables, override);
   const instances: DiscoveredAcpAgentInstance[] = [];
+  const rejectedInstances: RejectedAcpAgentInstance[] = [];
   for (const candidate of candidates) {
     const [versionResult, helpResult] = await Promise.all([
       runProbe(probe, candidate.command, strategy.discoveryProbe.versionArgs),
       runProbe(probe, candidate.command, strategy.discoveryProbe.helpArgs)
     ]);
+    const version = versionResult ? parseCliVersion(resultText(versionResult)) : undefined;
     if (!versionResult || !helpResult) {
+      if (includeRejectedCandidates && candidate.detected) {
+        const rejected: RejectedAcpAgentInstance = {
+          command: candidate.command,
+          source: candidate.source,
+          reason: versionResult ? "acp-probe-failed" : "version-probe-failed"
+        };
+        if (version !== undefined) rejected.version = version;
+        rejectedInstances.push(rejected);
+      }
       continue;
     }
     // A strategy with no `helpMatches` relies on the EXIT CODE: the help probe
@@ -174,9 +206,17 @@ async function discoverStrategyInstances(
       strategy.discoveryProbe.helpMatches !== undefined &&
       !strategy.discoveryProbe.helpMatches.test(resultText(helpResult))
     ) {
+      if (includeRejectedCandidates && candidate.detected) {
+        const rejected: RejectedAcpAgentInstance = {
+          command: candidate.command,
+          source: candidate.source,
+          reason: "acp-help-mismatch"
+        };
+        if (version !== undefined) rejected.version = version;
+        rejectedInstances.push(rejected);
+      }
       continue;
     }
-    const version = parseCliVersion(resultText(versionResult));
     const instance: DiscoveredAcpAgentInstance = {
       command: candidate.command,
       source: candidate.source
@@ -184,7 +224,7 @@ async function discoverStrategyInstances(
     if (version !== undefined) instance.version = version;
     instances.push(instance);
   }
-  if (instances.length === 0) {
+  if (instances.length === 0 && rejectedInstances.length === 0) {
     return undefined;
   }
   return {
@@ -194,11 +234,17 @@ async function discoverStrategyInstances(
     args: ensureArgs(strategy.spawn.args, strategy.spawn.ensureArgs),
     env: strategy.spawn.env ?? {},
     instances,
+    ...(rejectedInstances.length > 0 ? { rejectedInstances } : {}),
     discoveredAt: now()
   };
 }
 
-type Candidate = { command: string; source: AcpAgentInstanceSource };
+type Candidate = {
+  command: string;
+  source: AcpAgentInstanceSource;
+  /** True only when command enumeration found a concrete executable path. */
+  detected: boolean;
+};
 
 /** Build the de-duplicated candidate list for a strategy: override first, then
  *  every `PATH` match of the bare command (or the bare command itself when the
@@ -213,30 +259,43 @@ function candidateCommands(
 ): Candidate[] {
   const out: Candidate[] = [];
   const seen = new Set<string>();
-  const push = (command: string, source: AcpAgentInstanceSource): void => {
+  const push = (
+    command: string,
+    source: AcpAgentInstanceSource,
+    detected: boolean
+  ): void => {
     const trimmed = command.trim();
     if (trimmed.length === 0) return;
     const key = canonicalize(trimmed);
     if (seen.has(key)) return;
     seen.add(key);
-    out.push({ command: trimmed, source });
+    out.push({ command: trimmed, source, detected });
   };
 
   if (override && override.trim().length > 0) {
-    push(override, "override");
+    push(override, "override", isExecutableFile(override));
   }
   const pathMatches = listExecutables(strategy.discoveryProbe.command, env);
   if (pathMatches.length > 0) {
-    for (const match of pathMatches) push(match, "path");
+    for (const match of pathMatches) push(match, "path", true);
   } else {
     // No PATH hit (or an injected no-op lister): keep the bare command so
     // `execFile` resolves it via its own PATH and scripted-probe tests match.
-    push(strategy.discoveryProbe.command, "path");
+    push(strategy.discoveryProbe.command, "path", false);
   }
   for (const fallback of strategy.discoveryProbe.fallbackCommands ?? []) {
-    push(fallback, "fallback");
+    push(fallback, "fallback", isExecutableFile(fallback));
   }
   return out;
+}
+
+function isExecutableFile(command: string): boolean {
+  try {
+    const stat = statSync(command);
+    return stat.isFile() && (process.platform === "win32" || (stat.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve symlinks so the same binary reached via two PATH entries dedupes. */

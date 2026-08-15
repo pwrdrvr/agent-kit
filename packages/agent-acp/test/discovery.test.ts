@@ -173,6 +173,81 @@ describe("discoverLocalAcpAgentInstances — every installed instance", () => {
     const groups = await discoverLocalAcpAgentInstances({ probe, listExecutables: noPathScan });
     expect(groups).toEqual([]);
   });
+
+  it("reports a detected candidate that fails its ACP probe when requested", async () => {
+    const kimiPath = "/opt/tools/kimi";
+    const strategy: AcpAgentStrategy = {
+      ...BUILT_IN_ACP_STRATEGIES.find((entry) => entry.id === "kimi")!,
+      discoveryProbe: {
+        ...BUILT_IN_ACP_STRATEGIES.find((entry) => entry.id === "kimi")!.discoveryProbe,
+        fallbackCommands: []
+      }
+    };
+    const probe: LocalAcpAgentProbe = async (command, args) => {
+      if (command !== kimiPath) throw new Error("command not found");
+      if (args.includes("--version")) return { stdout: "0.11.0" };
+      throw new Error("error: unknown command 'acp'");
+    };
+
+    const groups = await discoverLocalAcpAgentInstances({
+      includeRejectedCandidates: true,
+      probe,
+      strategies: [strategy],
+      listExecutables: listFrom({ kimi: [kimiPath] })
+    });
+
+    expect(groups).toEqual([
+      expect.objectContaining({
+        strategyId: "kimi",
+        instances: [],
+        rejectedInstances: [
+          {
+            command: kimiPath,
+            version: "0.11.0",
+            source: "path",
+            reason: "acp-probe-failed"
+          }
+        ]
+      })
+    ]);
+  });
+
+  it("keeps rejected candidates alongside usable instances", async () => {
+    const current = "/opt/homebrew/bin/qwen";
+    const incompatible = "/Users/me/.local/bin/qwen";
+    const strategy: AcpAgentStrategy = {
+      ...qwenStrategy,
+      discoveryProbe: {
+        ...qwenStrategy.discoveryProbe,
+        fallbackCommands: []
+      }
+    };
+    const probe: LocalAcpAgentProbe = async (command, args) => {
+      if (args.includes("--version")) return { stdout: "0.21.0" };
+      return {
+        stdout: command === current ? "Qwen Code\nflags: --acp" : "other qwen tool"
+      };
+    };
+
+    const groups = await discoverLocalAcpAgentInstances({
+      includeRejectedCandidates: true,
+      probe,
+      strategies: [strategy],
+      listExecutables: listFrom({ qwen: [current, incompatible] })
+    });
+
+    expect(groups[0]).toMatchObject({
+      instances: [{ command: current, version: "0.21.0", source: "path" }],
+      rejectedInstances: [
+        {
+          command: incompatible,
+          version: "0.21.0",
+          source: "path",
+          reason: "acp-help-mismatch"
+        }
+      ]
+    });
+  });
 });
 
 describe("default executable lister — version-manager dirs", () => {
