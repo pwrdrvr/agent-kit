@@ -133,6 +133,7 @@ export {
   type DiscoveredAcpAgent,
   type DiscoveredAcpAgentGroup,
   type DiscoveredAcpAgentInstance,
+  type RejectedAcpAgentInstance,
   type AcpAgentInstanceSource,
   type AcpPathExecutableLister,
   type LocalAcpDiscoveryOptions
