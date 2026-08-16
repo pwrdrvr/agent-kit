@@ -1,5 +1,11 @@
 # @pwrdrvr/agent-acp
 
+## 0.14.0
+
+### Minor Changes
+
+- 0efb9c6: Expose detected local ACP candidates that fail version or ACP capability probes when a host opts into diagnostic discovery results.
+
 ## 0.13.1
 
 ### Patch Changes
