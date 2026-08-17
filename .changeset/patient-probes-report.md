@@ -1,6 +1,7 @@
 ---
 "@pwrdrvr/codex-discovery": minor
 "@pwrdrvr/agent-acp": minor
+"@pwrdrvr/agent-client": minor
 ---
 
 Report a probe that ran out of time as "did not answer in time" instead of "not installed", and let callers own the budget.
@@ -9,4 +10,6 @@ Report a probe that ran out of time as "did not answer in time" instead of "not 
 
 `agent-acp`: `AcpConnection.request` now enforces the `timeoutMs` it has always accepted and silently ignored — an agent that took a request and went quiet hung the caller indefinitely, including the 30s `initialize` and 1h `session/prompt` budgets `AcpAgentClient` passes. Local discovery's probe budget is configurable via `probeTimeoutMs` (`DEFAULT_ACP_PROBE_TIMEOUT_MS`, unchanged at 5s) with `AbortSignal` support, and a probe that overran is reported as `reason: "probe-timed-out"` rather than `version-probe-failed`.
 
-Both packages' probes now settle within their budget even when the child cannot be killed — on Windows a `.cmd` shim runs under `cmd.exe`, and killing the wrapper can leave a `node` grandchild holding the stdio pipes open, so waiting on process exit could hang past any timeout.
+`agent-client`: `CodexThreadClient` and `CodexOneShotClient` resolve their binary through discovery on first connect, so they gain `commandVersionTimeoutMs` to size that probe. Without it a host could only take the default, and an overrun surfaced as `CodexCliNotInstalledError` from the first call.
+
+All three packages' probes now settle within their budget even when the child cannot be killed — on Windows a `.cmd` shim runs under `cmd.exe`, and killing the wrapper can leave a `node` grandchild holding the stdio pipes open, so waiting on process exit could hang past any timeout.

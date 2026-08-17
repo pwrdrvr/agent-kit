@@ -75,6 +75,12 @@ export type CodexThreadClientOptions = {
   serviceName?: string;
   requestTimeoutMs?: number;
   turnTimeoutMs?: number;
+  /** Budget for the `codex --version` probe run during command discovery.
+   *  Defaults to codex-discovery's `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. Raise
+   *  it on machines where the CLI is an npm shim behind a slow launcher: an
+   *  overrun surfaces as `CodexCliNotInstalledError` (with `probeTimedOut`
+   *  set), which reads as a missing CLI unless the caller checks. */
+  commandVersionTimeoutMs?: number;
   /** Process env passed to the spawned codex. Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
   /** Override the transport (tests inject an in-memory fake). When supplied,
@@ -418,7 +424,10 @@ export class CodexThreadClient implements AgentBackend {
     if (this.resolvedCommand !== null) return this.resolvedCommand;
     const resolved = await resolveCodexCommand({
       command: this.options.command ?? "codex",
-      env: this.options.env ?? process.env
+      env: this.options.env ?? process.env,
+      ...(this.options.commandVersionTimeoutMs !== undefined
+        ? { versionTimeoutMs: this.options.commandVersionTimeoutMs }
+        : {})
     });
     this.resolvedCommand = resolved.command;
     return resolved.command;
