@@ -25,11 +25,22 @@ function parseSimpleVersion(output: string): string | undefined {
   return output.match(/(\d+\.\d+\.\d+)/)?.[1];
 }
 
-/** A shim that never answers `--version` inside a small budget. `sleep` is
- *  short so a killed probe cannot leave a long-lived orphan behind. */
+/**
+ * A shim that cannot answer `--version` inside a small budget.
+ *
+ * Deliberately NOT `#!/bin/sh` + `sleep`: these probes run with an env whose
+ * `PATH` is just the temp dir, so the shell cannot resolve `sleep`, prints
+ * "command not found", and races on to `echo` — answering instantly. Running
+ * the delay inside `process.execPath` needs no `PATH` lookup at all, and dies
+ * cleanly on kill instead of orphaning a `sleep`.
+ */
 function writeSlowShim(dir: string, name = "slowtool"): string {
   const shim = path.join(dir, name);
-  writeFileSync(shim, `#!/bin/sh\nsleep 3\necho "${name} 9.9.9"\n`, "utf8");
+  writeFileSync(
+    shim,
+    `#!${process.execPath}\nsetTimeout(() => { console.log("${name} 9.9.9"); }, 3000);\n`,
+    "utf8",
+  );
   chmodSync(shim, 0o755);
   return shim;
 }
