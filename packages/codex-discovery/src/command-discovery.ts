@@ -287,11 +287,30 @@ export type ReadCommandVersionOptions = {
   signal?: AbortSignal | undefined;
 };
 
-function normalizeVersionTimeoutMs(timeoutMs: number | undefined): number {
+/**
+ * Clamp a caller-supplied budget to something a timer can actually honor.
+ *
+ * The `Number.isFinite` guard is load-bearing, not defensive: `Infinity` is the
+ * natural spelling of "no budget", and both consumers of the result reject it —
+ * `setTimeout` silently collapses a non-finite delay to 1ms, and `execFile`'s
+ * `timeout` option throws `ERR_OUT_OF_RANGE` synchronously. Either way a
+ * caller asking for "no limit" would get "no time at all".
+ *
+ * Package-internal (not re-exported from the index) so every budget in this
+ * package answers to one policy.
+ */
+export function normalizeTimeoutMs(
+  timeoutMs: number | undefined,
+  fallbackMs: number,
+): number {
   if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) {
-    return DEFAULT_COMMAND_VERSION_TIMEOUT_MS;
+    return fallbackMs;
   }
   return Math.max(1, Math.floor(timeoutMs));
+}
+
+function normalizeVersionTimeoutMs(timeoutMs: number | undefined): number {
+  return normalizeTimeoutMs(timeoutMs, DEFAULT_COMMAND_VERSION_TIMEOUT_MS);
 }
 
 function cancelledVersionProbe(
@@ -482,7 +501,14 @@ export async function buildCommandDiscoveryCandidate<Source extends string>(
   const versionResult: CommandVersionProbeResult = existence !== "not_found"
     ? preflightResult?.skipVersionProbe
       ? {
-          outcome: preflightResult.version ? "ok" : "version_not_reported",
+          // Carry the preflight's own verdict into the outcome. Hardcoding
+          // "version_not_reported" here would swallow a preflight that said
+          // "not_found", which the failure-reason mapping below keys on.
+          outcome: preflightResult.version
+            ? "ok"
+            : preflightResult.versionFailureReason === "not_found"
+              ? "not_found"
+              : "version_not_reported",
           ran: accessExecutable,
           version: preflightResult.version,
           failureReason: preflightResult.version
@@ -602,13 +628,21 @@ export async function discoverCommands<Source extends string>(
     selected.selected = true;
   }
 
+  // Report abandonment from the EVIDENCE, not from a trailing read of the
+  // signal: a signal that fires after every probe finished leaves a complete
+  // snapshot, and labelling that one aborted makes callers discard good
+  // results (and, in `resolveCodexCommand`, mask a `codex_too_old` verdict).
+  const abandoned = candidates.some(
+    (candidate) => candidate.versionProbeOutcome === "aborted",
+  );
+
   return {
     selectedCommand: selected?.command,
     selectedSource: selected?.source,
     candidates,
     // Partial results still ship — an aborted run reports WHY it is thin
     // instead of looking like a machine with nothing installed.
-    ...(options.signal?.aborted ? { error: COMMAND_DISCOVERY_ABORTED } : {}),
+    ...(abandoned ? { error: COMMAND_DISCOVERY_ABORTED } : {}),
   };
 }
 
@@ -704,11 +738,18 @@ export async function resolveDiscoveredCommand<Source extends string>(params: {
   // Nothing was selected. Say WHY when a probe simply ran out of budget —
   // otherwise this bare fallback is indistinguishable from "searched
   // everywhere, found nothing", which is the wrong story to tell a user.
-  const unproven = discovery.candidates.find((candidate) =>
-    isUnprovenVersionProbe(candidate.versionProbeOutcome),
+  //
+  // Only THIS command's own outcome qualifies: pinning some other candidate's
+  // timeout onto the returned name would send a caller off to re-probe a
+  // command that never timed out, which fails the same way forever.
+  const fallbackCommand = params.command.trim() || path.basename(params.command);
+  const unproven = discovery.candidates.find(
+    (candidate) =>
+      candidate.command === fallbackCommand
+      && isUnprovenVersionProbe(candidate.versionProbeOutcome),
   );
   return {
-    command: params.command.trim() || path.basename(params.command),
+    command: fallbackCommand,
     source: params.fallbackSource,
     versionProbeOutcome: unproven?.versionProbeOutcome,
   };

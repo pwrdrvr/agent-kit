@@ -21,10 +21,12 @@ import {
   type OpenExternal,
 } from "@pwrdrvr/agent-core";
 import { createCommandInvocation } from "@pwrdrvr/agent-transport";
+import { normalizeTimeoutMs } from "./command-discovery";
 import { readCodexAuthInfo } from "./codex-profiles";
 import type {
   CodexAuthStatusResponse,
   CodexProfileLoginResponse,
+  CodexStatusResult,
 } from "./types";
 
 const LOGIN_URL_TIMEOUT_MS = 8_000;
@@ -37,21 +39,6 @@ const LOGIN_URL_TIMEOUT_MS = 8_000;
  * wedged child hung the caller forever.
  */
 export const DEFAULT_CODEX_STATUS_TIMEOUT_MS = 10_000;
-
-/** How a `codex login status` probe ended. `timed_out` says the CLI did not
- *  answer within the budget — NOT that the profile is unauthenticated. */
-export type CodexStatusOutcome =
-  | "answered"
-  | "timed_out"
-  | "aborted"
-  | "spawn_failed";
-
-export type CodexStatusResult = {
-  /** Process exit code; `null` when the CLI never got to report one. */
-  code: number | null;
-  detail: string;
-  outcome: CodexStatusOutcome;
-};
 
 export type CollectCodexStatusOptions = {
   /** Defaults to `DEFAULT_CODEX_STATUS_TIMEOUT_MS`. */
@@ -73,9 +60,9 @@ export function collectCodexStatus(
   codexHome: string,
   options: CollectCodexStatusOptions = {},
 ): Promise<CodexStatusResult> {
-  const timeoutMs = Math.max(
-    1,
-    Math.floor(options.timeoutMs ?? DEFAULT_CODEX_STATUS_TIMEOUT_MS),
+  const timeoutMs = normalizeTimeoutMs(
+    options.timeoutMs,
+    DEFAULT_CODEX_STATUS_TIMEOUT_MS,
   );
   return new Promise((resolve) => {
     if (options.signal?.aborted) {
@@ -105,6 +92,15 @@ export function collectCodexStatus(
       settled = true;
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", onAbort);
+      // Stop reading once we've answered. A child that survives `kill()` (the
+      // Windows `cmd.exe` -> `node` case this budget exists for) would
+      // otherwise keep appending to `output` forever — there is no `maxBuffer`
+      // on a raw `spawn`, so the string, the child, and this closure would all
+      // stay alive unbounded after the caller moved on.
+      child.stdout.removeAllListeners("data");
+      child.stderr.removeAllListeners("data");
+      child.stdout.destroy();
+      child.stderr.destroy();
       resolve(result);
     };
     // Resolve on OUR schedule rather than waiting for the child to die: on
@@ -172,9 +168,10 @@ export async function checkCodexAuthStatus(params: {
         : authenticated
           ? "authenticated"
           : "unauthenticated",
-    // `failed` alone reads as "this profile is broken". Flagging the timeout
-    // lets a host say "couldn't check in time" and retry instead.
-    ...(result.outcome === "timed_out" ? { timedOut: true } : {}),
+    // `failed` alone reads as "this profile is broken". Passing the outcome
+    // through lets a host say "couldn't check in time" (or "we cancelled it")
+    // and retry, instead of painting a signed-in profile as broken.
+    ...(result.outcome !== "answered" ? { outcome: result.outcome } : {}),
     ...(result.detail ? { detail: result.detail } : {}),
     ...(authInfo.email ? { email: authInfo.email } : {}),
     ...(authInfo.planType ? { planType: authInfo.planType } : {}),

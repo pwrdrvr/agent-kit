@@ -228,12 +228,16 @@ async function discoverStrategyInstances(
     const helpResult = helpAttempt.ok ? helpAttempt.result : undefined;
     const version = versionResult ? parseCliVersion(resultText(versionResult)) : undefined;
     if (!versionResult || !helpResult) {
-      if (includeRejectedCandidates && candidate.detected) {
-        // A probe that ran out of budget is not a verdict on the CLI — label it
-        // separately so a host can re-probe instead of reporting it unusable.
-        const timedOut =
-          (!versionAttempt.ok && versionAttempt.timedOut) ||
-          (!helpAttempt.ok && helpAttempt.timedOut);
+      // A probe that ran out of budget is not a verdict on the CLI — it is an
+      // unfinished measurement. Record it even when the caller did not opt into
+      // diagnostics, because dropping it is exactly what makes a slow machine
+      // look like a machine with nothing installed. (Genuine probe FAILURES
+      // stay behind `includeRejectedCandidates` — those are verdicts, and the
+      // legacy default is installed-only.)
+      const timedOut =
+        (!versionAttempt.ok && versionAttempt.timedOut) ||
+        (!helpAttempt.ok && helpAttempt.timedOut);
+      if (candidate.detected && (timedOut || includeRejectedCandidates)) {
         const rejected: RejectedAcpAgentInstance = {
           command: candidate.command,
           source: candidate.source,
@@ -504,16 +508,28 @@ function isProbeTimeout(error: unknown): boolean {
   );
 }
 
+/**
+ * Clamp a caller-supplied probe budget.
+ *
+ * The `Number.isFinite` guard is load-bearing: `Infinity` is the natural way to
+ * ask for "no budget", and `execFile` rejects a non-finite `timeout` with a
+ * synchronous `ERR_OUT_OF_RANGE` — which `runProbe` would then classify as a
+ * failed probe and report as "not installed" for every agent on the machine.
+ */
+function normalizeProbeTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) {
+    return DEFAULT_ACP_PROBE_TIMEOUT_MS;
+  }
+  return Math.max(1, Math.floor(timeoutMs));
+}
+
 function makeDefaultProbe(env: NodeJS.ProcessEnv): LocalAcpAgentProbe {
   return async (
     command: string,
     args: string[],
     options: LocalAcpProbeOptions = {}
   ): Promise<LocalAcpProbeResult> => {
-    const timeoutMs = Math.max(
-      1,
-      Math.floor(options.timeoutMs ?? DEFAULT_ACP_PROBE_TIMEOUT_MS)
-    );
+    const timeoutMs = normalizeProbeTimeoutMs(options.timeoutMs);
     const launchEnv = prependCommandDirToPath(command, env);
     const invocation = createCommandInvocation({ command, args, env: launchEnv });
     const controller = new AbortController();
@@ -538,6 +554,9 @@ function makeDefaultProbe(env: NodeJS.ProcessEnv): LocalAcpAgentProbe {
         timeout: timeoutMs,
         signal: controller.signal,
         maxBuffer: 1024 * 1024,
+        // A Windows `.cmd` shim runs through `cmd.exe`; without this every
+        // discovery pass flashes console windows over the host app.
+        windowsHide: true,
         // Prepend the candidate's own dir so a node-script CLI (e.g. an nvm-
         // installed `qwen`) finds its sibling `node` during the probe.
         env: launchEnv,

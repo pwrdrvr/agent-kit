@@ -60,8 +60,6 @@ export {
   parseCodexLoginPrompt,
   CodexLoginManager,
   type CodexLoginManagerOptions,
-  type CodexStatusOutcome,
-  type CodexStatusResult,
   type CollectCodexStatusOptions,
   type StartCodexLoginParams,
   startCodexProfileLoginProcess,

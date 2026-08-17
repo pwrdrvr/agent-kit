@@ -429,6 +429,16 @@ export class CodexThreadClient implements AgentBackend {
         ? { versionTimeoutMs: this.options.commandVersionTimeoutMs }
         : {})
     });
+    // An unproven probe means the version gate never ran: `validateVersion` is
+    // gated on a version being present, so a too-old CLI passes selection on
+    // `access(X_OK)` alone. Say so instead of spawning it silently — the later
+    // failure is an opaque protocol error with no link back to this cause.
+    if (resolved.version === undefined && resolved.versionProbeOutcome !== undefined) {
+      this.logger.warn("codex version unverified; minimum-version gate skipped", {
+        command: resolved.command,
+        versionProbeOutcome: resolved.versionProbeOutcome
+      });
+    }
     this.resolvedCommand = resolved.command;
     return resolved.command;
   }

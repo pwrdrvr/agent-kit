@@ -794,6 +794,14 @@ export class AcpAgentClient implements AgentBackend {
   private async initialize(): Promise<void> {
     if (this.initialized) return;
 
+    // `initialize` can REJECT (it carries a 30s budget), leaving `initialized`
+    // false — so this method is re-entered on the caller's retry. Drop any
+    // handlers a previous attempt installed first: they are unreachable once
+    // the fields below are overwritten, and a stale one left registered makes
+    // every later session/update dispatch twice, duplicating the transcript.
+    this.unsubscribeNotification?.();
+    this.unsubscribeRequest?.();
+
     this.unsubscribeNotification = this.transport.onNotification((method, params) => {
       this.handleNotification(method, params);
     });

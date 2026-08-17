@@ -89,6 +89,10 @@ describe.skipIf(isWindows)("readCommandVersion — outcomes", () => {
     }
   });
 
+  // These two exercise the DEFAULT budget, which is 10s — longer than vitest's
+  // own 5s per-test limit. Without the explicit test timeout a slow spawn (a
+  // freshly written shim on macOS measures 1.5-4.8s under load) aborts the
+  // test with a harness error that names vitest instead of the probe.
   it("reports ok with the parsed version when the command answers", async () => {
     const dir = makeTempDir();
     try {
@@ -104,7 +108,7 @@ describe.skipIf(isWindows)("readCommandVersion — outcomes", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, DEFAULT_COMMAND_VERSION_TIMEOUT_MS + 5_000);
 
   it("reports not_found for a missing command", async () => {
     const dir = makeTempDir();
@@ -157,7 +161,7 @@ describe.skipIf(isWindows)("readCommandVersion — outcomes", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, DEFAULT_COMMAND_VERSION_TIMEOUT_MS + 5_000);
 
   it("reports aborted without spawning when the signal is already aborted", async () => {
     const result = await readCommandVersion({

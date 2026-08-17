@@ -362,6 +362,13 @@ export async function resolveCodexCommand(params: {
     (candidate) => candidate.failureReason === "codex_too_old",
   );
 
+  // Abort first: an abandoned run may still have "selected" something whose
+  // version never got measured, and handing that back would silently skip the
+  // MINIMUM_CODEX_CLI_VERSION gate on a result the caller already gave up on.
+  if (discovery.error === COMMAND_DISCOVERY_ABORTED) {
+    throw new CodexDiscoveryAbortedError();
+  }
+
   if (selected) {
     return {
       command: selected.command,
@@ -371,10 +378,6 @@ export async function resolveCodexCommand(params: {
       // UNKNOWN — a version-gating caller should re-probe, not demote it.
       versionProbeOutcome: selected.versionProbeOutcome,
     };
-  }
-
-  if (discovery.error === COMMAND_DISCOVERY_ABORTED) {
-    throw new CodexDiscoveryAbortedError();
   }
 
   if (rejectedOldCodex) {

@@ -410,6 +410,14 @@ export class CodexOneShotClient {
         ? { versionTimeoutMs: this.options.commandVersionTimeoutMs }
         : {})
     });
+    // See CodexThreadClient.resolveCommand: an unproven probe means the
+    // minimum-version gate never ran, so say so rather than spawning silently.
+    if (resolved.version === undefined && resolved.versionProbeOutcome !== undefined) {
+      this.logger.warn("codex version unverified; minimum-version gate skipped", {
+        command: resolved.command,
+        versionProbeOutcome: resolved.versionProbeOutcome
+      });
+    }
     this.resolvedCommand = resolved.command;
     return resolved.command;
   }

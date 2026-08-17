@@ -68,7 +68,13 @@ function withAcpRequestTimeout<T>(
   timeoutMs: number | undefined,
   run: () => Promise<T>
 ): Promise<T> {
-  if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) return run();
+  // `undefined`, non-finite, and non-positive all mean "no budget". Clamping a
+  // 0 up to 1ms would make the two common ways to spell "unlimited" behave
+  // oppositely: `Infinity` disables the timeout while `0` would reject every
+  // request after a millisecond.
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return run();
+  }
   const budget = Math.max(1, Math.floor(timeoutMs));
   const call = run();
   // The abandoned call settles eventually; keep that from surfacing as an

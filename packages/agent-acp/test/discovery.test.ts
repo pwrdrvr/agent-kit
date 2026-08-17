@@ -570,6 +570,72 @@ describe("strategy table extensibility (KTD-A2)", () => {
   });
 });
 
+// Everything above injects a fake `probe`, so the DEFAULT probe — the one that
+// actually spawns on a user's machine, and the only place the budget race
+// lives — would otherwise have no coverage at all. Deleting that race must not
+// leave the suite green.
+describe.skipIf(process.platform === "win32")("default probe (real spawn)", () => {
+  it("reports a CLI that cannot answer in time as probe-timed-out, not missing", async () => {
+    const { chmodSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(path.join(tmpdir(), "acp-probe-"));
+    try {
+      // Runs under process.execPath so the delay needs no PATH lookup and the
+      // child dies cleanly when the probe gives up.
+      const shim = path.join(dir, "kimi");
+      writeFileSync(
+        shim,
+        `#!${process.execPath}\nsetTimeout(() => { console.log("0.11.0"); }, 3000);\n`,
+        "utf8"
+      );
+      chmodSync(shim, 0o755);
+
+      const startedAt = Date.now();
+      const groups = await discoverLocalAcpAgentInstances({
+        // No `probe` — exercise makeDefaultProbe for real.
+        probeTimeoutMs: 200,
+        strategies: [strategyWithoutFallbacks("kimi")],
+        listExecutables: listFrom({ kimi: [shim] })
+      });
+
+      // The budget is authoritative even though the shim sleeps for 3s.
+      expect(Date.now() - startedAt).toBeLessThan(2_500);
+      expect(groups[0]?.instances).toEqual([]);
+      expect(groups[0]?.rejectedInstances).toEqual([
+        { command: shim, source: "path", reason: "probe-timed-out" }
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("does not report a non-finite budget as a broken install", async () => {
+    const { chmodSync, mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(path.join(tmpdir(), "acp-probe-"));
+    try {
+      const shim = path.join(dir, "kimi");
+      writeFileSync(shim, `#!/bin/sh\nif [ "$1" = "--version" ]; then echo 0.11.0; else echo "kimi acp"; fi\n`, "utf8");
+      chmodSync(shim, 0o755);
+
+      // `Infinity` is the natural spelling of "no budget"; execFile rejects a
+      // non-finite timeout synchronously, which would otherwise be classified
+      // as a failed probe and reported as "not installed".
+      const groups = await discoverLocalAcpAgentInstances({
+        probeTimeoutMs: Number.POSITIVE_INFINITY,
+        strategies: [strategyWithoutFallbacks("kimi")],
+        listExecutables: listFrom({ kimi: [shim] })
+      });
+
+      expect(groups[0]?.instances).toEqual([
+        { command: shim, source: "path", version: "0.11.0" }
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+});
+
 describe("normalizer has no inline agent-id branch (KTD-A2 guard)", async () => {
   it("contains no `agentId ===` / `backendId ===` / `=== \"gemini\"` literal", async () => {
     const { readFile } = await import("node:fs/promises");
