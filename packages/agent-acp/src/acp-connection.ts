@@ -49,6 +49,46 @@ export interface AcpAgentConnection {
   notify(method: string, params: Record<string, unknown>): Promise<void>;
 }
 
+/** Prefix on the rejection when a request outlived its budget. Lets a caller
+ *  tell "the agent did not answer in time" apart from "the agent answered with
+ *  an error" — the two want different recovery (retry / restart vs. surface). */
+export const ACP_REQUEST_TIMEOUT_MESSAGE_PREFIX = "acp request timed out";
+
+/**
+ * Enforce a per-request budget. Callers have been passing `timeoutMs` all
+ * along (`AcpAgentClient` sends 30s for `initialize`, 1h for `session/prompt`)
+ * but it was dropped on the floor here, so an agent that accepted the request
+ * and then went quiet hung the caller forever with no diagnostic.
+ *
+ * The in-flight SDK call cannot be cancelled, so this unblocks the CALLER and
+ * lets the connection's own teardown deal with the process.
+ */
+function withAcpRequestTimeout<T>(
+  method: string,
+  timeoutMs: number | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) return run();
+  const budget = Math.max(1, Math.floor(timeoutMs));
+  const call = run();
+  // The abandoned call settles eventually; keep that from surfacing as an
+  // unhandled rejection once the race is already decided.
+  void call.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(`${ACP_REQUEST_TIMEOUT_MESSAGE_PREFIX} after ${budget}ms: ${method}`)
+        ),
+      budget
+    );
+  });
+  return Promise.race([call, expiry]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 /** Built connection + a teardown handle (kills the child / closes streams). */
 export type AcpAgentConnectionHandle = {
   connection: AcpAgentConnection;
@@ -187,11 +227,21 @@ export class AcpConnection implements AcpJsonRpcTransport {
   async request(
     method: string,
     params: Record<string, unknown> = {},
-    _timeoutMs?: number
+    timeoutMs?: number
   ): Promise<unknown> {
     await this.ensureConnected();
     const conn = this.connection;
     if (!conn) throw new Error("acp connection unavailable");
+    return await withAcpRequestTimeout(method, timeoutMs, () =>
+      this.dispatch(conn, method, params)
+    );
+  }
+
+  private async dispatch(
+    conn: AcpAgentConnection,
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
     switch (method) {
       case "initialize":
         return await conn.initialize(params);

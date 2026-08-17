@@ -29,12 +29,17 @@ import type {
   AcpAgentStrategy,
   AcpAgentStrategy as Strategy,
   LocalAcpAgentProbe,
+  LocalAcpProbeOptions,
   LocalAcpProbeResult
 } from "../strategies/strategy-types";
 
 const execFile = promisify(execFileCallback);
 
-export type { LocalAcpAgentProbe, LocalAcpProbeResult } from "../strategies/strategy-types";
+export type {
+  LocalAcpAgentProbe,
+  LocalAcpProbeOptions,
+  LocalAcpProbeResult
+} from "../strategies/strategy-types";
 
 /** How a discovered instance's executable path was located. */
 export type AcpAgentInstanceSource = "override" | "path" | "fallback";
@@ -56,7 +61,14 @@ export type RejectedAcpAgentInstance = {
   /** Parsed from successful `--version` output when available. */
   version?: string;
   source: AcpAgentInstanceSource;
-  reason: "version-probe-failed" | "acp-probe-failed" | "acp-help-mismatch";
+  /** `probe-timed-out` means the CLI did not answer within the probe budget —
+   *  UNLIKE the other reasons it is not a verdict on the CLI, and a host may
+   *  re-probe on a larger `probeTimeoutMs` instead of reporting it unusable. */
+  reason:
+    | "version-probe-failed"
+    | "acp-probe-failed"
+    | "acp-help-mismatch"
+    | "probe-timed-out";
 };
 
 /** Every installed instance of one agent found on this machine. */
@@ -111,7 +123,24 @@ export type LocalAcpDiscoveryOptions = {
   /** Include candidates known to exist but rejected by a discovery probe.
    *  Defaults false to preserve the legacy installed-only result. */
   includeRejectedCandidates?: boolean;
+  /** Budget for ONE probe spawn (the default probe only — an injected `probe`
+   *  owns its own timing). Defaults to `DEFAULT_ACP_PROBE_TIMEOUT_MS`. */
+  probeTimeoutMs?: number;
+  /** Abandon discovery in flight (re-triggered discovery, app quitting).
+   *  Already-probed groups are still returned. */
+  signal?: AbortSignal;
 };
+
+/**
+ * Budget for one ACP discovery probe spawn, in ms.
+ *
+ * Unchanged from the value this module has always used. Kept lower than
+ * codex-discovery's version-probe budget on purpose: `discoverStrategyInstances`
+ * walks its candidates SERIALLY, so the worst case here is (candidates x
+ * budget) rather than a single budget. Hosts that scan machines with many
+ * installed copies can raise it knowingly via `probeTimeoutMs`.
+ */
+export const DEFAULT_ACP_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Discover every installed instance of each agent (all `PATH` matches +
@@ -127,6 +156,10 @@ export async function discoverLocalAcpAgentInstances(
   const probe = options.probe ?? makeDefaultProbe(env);
   const listExecutables = options.listExecutables ?? defaultListExecutables;
   const now = options.now ?? Date.now;
+  const probeOptions: LocalAcpProbeOptions = {
+    timeoutMs: options.probeTimeoutMs ?? DEFAULT_ACP_PROBE_TIMEOUT_MS,
+    signal: options.signal
+  };
   const groups = await Promise.all(
     strategies.map((strategy) =>
       discoverStrategyInstances(
@@ -136,7 +169,8 @@ export async function discoverLocalAcpAgentInstances(
         env,
         listExecutables,
         options.overrides?.[strategy.id],
-        options.includeRejectedCandidates === true
+        options.includeRejectedCandidates === true,
+        probeOptions
       )
     )
   );
@@ -175,23 +209,39 @@ async function discoverStrategyInstances(
   env: NodeJS.ProcessEnv,
   listExecutables: AcpPathExecutableLister,
   override?: string,
-  includeRejectedCandidates = false
+  includeRejectedCandidates = false,
+  probeOptions: LocalAcpProbeOptions = {}
 ): Promise<DiscoveredAcpAgentGroup | undefined> {
   const candidates = candidateCommands(strategy, env, listExecutables, override);
   const instances: DiscoveredAcpAgentInstance[] = [];
   const rejectedInstances: RejectedAcpAgentInstance[] = [];
   for (const candidate of candidates) {
-    const [versionResult, helpResult] = await Promise.all([
-      runProbe(probe, candidate.command, strategy.discoveryProbe.versionArgs),
-      runProbe(probe, candidate.command, strategy.discoveryProbe.helpArgs)
+    if (probeOptions.signal?.aborted) break;
+    const [versionAttempt, helpAttempt] = await Promise.all([
+      runProbe(probe, candidate.command, strategy.discoveryProbe.versionArgs, probeOptions),
+      runProbe(probe, candidate.command, strategy.discoveryProbe.helpArgs, probeOptions)
     ]);
+    // An abort landed while these were in flight: whatever they returned is an
+    // abandoned measurement, not a verdict on this candidate. Record nothing.
+    if (probeOptions.signal?.aborted) break;
+    const versionResult = versionAttempt.ok ? versionAttempt.result : undefined;
+    const helpResult = helpAttempt.ok ? helpAttempt.result : undefined;
     const version = versionResult ? parseCliVersion(resultText(versionResult)) : undefined;
     if (!versionResult || !helpResult) {
       if (includeRejectedCandidates && candidate.detected) {
+        // A probe that ran out of budget is not a verdict on the CLI — label it
+        // separately so a host can re-probe instead of reporting it unusable.
+        const timedOut =
+          (!versionAttempt.ok && versionAttempt.timedOut) ||
+          (!helpAttempt.ok && helpAttempt.timedOut);
         const rejected: RejectedAcpAgentInstance = {
           command: candidate.command,
           source: candidate.source,
-          reason: versionResult ? "acp-probe-failed" : "version-probe-failed"
+          reason: timedOut
+            ? "probe-timed-out"
+            : versionResult
+              ? "acp-probe-failed"
+              : "version-probe-failed"
         };
         if (version !== undefined) rejected.version = version;
         rejectedInstances.push(rejected);
@@ -433,30 +483,100 @@ function ensureArgs(args: string[], ensure: string[] | undefined): string[] {
   return result;
 }
 
+/** Thrown by the default probe when its budget elapses. Distinguishable from
+ *  a probe that ran and failed, which is a verdict on the CLI. */
+class AcpProbeTimeoutError extends Error {
+  constructor(command: string, timeoutMs: number) {
+    super(`acp probe did not answer within ${timeoutMs}ms: ${command}`);
+    this.name = "AcpProbeTimeoutError";
+  }
+}
+
+function isProbeTimeout(error: unknown): boolean {
+  if (error instanceof AcpProbeTimeoutError) return true;
+  // Covers an injected probe that leans on `execFile`'s own `timeout` (which
+  // sets `killed`) or on an AbortSignal.
+  const name = (error as { name?: unknown } | undefined)?.name;
+  return (
+    (error as { killed?: unknown } | undefined)?.killed === true ||
+    name === "AbortError" ||
+    name === "TimeoutError"
+  );
+}
+
 function makeDefaultProbe(env: NodeJS.ProcessEnv): LocalAcpAgentProbe {
-  return async (command: string, args: string[]): Promise<LocalAcpProbeResult> => {
+  return async (
+    command: string,
+    args: string[],
+    options: LocalAcpProbeOptions = {}
+  ): Promise<LocalAcpProbeResult> => {
+    const timeoutMs = Math.max(
+      1,
+      Math.floor(options.timeoutMs ?? DEFAULT_ACP_PROBE_TIMEOUT_MS)
+    );
     const launchEnv = prependCommandDirToPath(command, env);
     const invocation = createCommandInvocation({ command, args, env: launchEnv });
-    return await execFile(invocation.command, invocation.args, {
-      timeout: 5_000,
-      maxBuffer: 1024 * 1024,
-      // Prepend the candidate's own dir so a node-script CLI (e.g. an nvm-
-      // installed `qwen`) finds its sibling `node` during the probe.
-      env: launchEnv,
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments
+    const controller = new AbortController();
+    let timedOut = false;
+    const onAbort = (): void => controller.abort();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    // Race the spawn against the budget rather than trusting `execFile`'s own
+    // `timeout` alone: these CLIs are frequently Windows `.cmd` shims, and
+    // killing the `cmd.exe` wrapper can leave a `node` grandchild holding the
+    // pipes open so `execFile` never calls back at all.
+    const expired = new Promise<"expired">((resolve) => {
+      controller.signal.addEventListener("abort", () => resolve("expired"), {
+        once: true
+      });
     });
+    try {
+      const execution = execFile(invocation.command, invocation.args, {
+        timeout: timeoutMs,
+        signal: controller.signal,
+        maxBuffer: 1024 * 1024,
+        // Prepend the candidate's own dir so a node-script CLI (e.g. an nvm-
+        // installed `qwen`) finds its sibling `node` during the probe.
+        env: launchEnv,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments
+      }).then(
+        (result) => ({ ok: true as const, result }),
+        (error: unknown) => ({ ok: false as const, error })
+      );
+      const settled = await Promise.race([execution, expired]);
+      if (settled === "expired") {
+        if (timedOut) throw new AcpProbeTimeoutError(command, timeoutMs);
+        throw new Error(`acp probe aborted: ${command}`);
+      }
+      if (!settled.ok) {
+        if (timedOut) throw new AcpProbeTimeoutError(command, timeoutMs);
+        throw settled.error;
+      }
+      return settled.result;
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+    }
   };
 }
+
+type ProbeAttempt =
+  | { ok: true; result: LocalAcpProbeResult }
+  | { ok: false; timedOut: boolean };
 
 async function runProbe(
   probe: LocalAcpAgentProbe,
   command: string,
-  args: string[]
-): Promise<LocalAcpProbeResult | undefined> {
+  args: string[],
+  options: LocalAcpProbeOptions
+): Promise<ProbeAttempt> {
   try {
-    return await probe(command, args);
-  } catch {
-    return undefined;
+    return { ok: true, result: await probe(command, args, options) };
+  } catch (error) {
+    return { ok: false, timedOut: isProbeTimeout(error) };
   }
 }
 

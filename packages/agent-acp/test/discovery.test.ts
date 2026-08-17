@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { NormalizedThreadEvent } from "@pwrdrvr/agent-core";
 import {
+  DEFAULT_ACP_PROBE_TIMEOUT_MS,
   discoverLocalAcpAgents,
   discoverLocalAcpAgentInstances,
   type AcpPathExecutableLister,
@@ -32,6 +33,16 @@ function scriptedProbe(
       return { stdout: entry.version };
     }
     return { stdout: entry.help };
+  };
+}
+
+/** A built-in strategy with its fallback paths stripped, so a test sees only
+ *  the candidates its lister returns. */
+function strategyWithoutFallbacks(id: string): AcpAgentStrategy {
+  const strategy = BUILT_IN_ACP_STRATEGIES.find((entry) => entry.id === id)!;
+  return {
+    ...strategy,
+    discoveryProbe: { ...strategy.discoveryProbe, fallbackCommands: [] }
   };
 }
 
@@ -210,6 +221,88 @@ describe("discoverLocalAcpAgentInstances — every installed instance", () => {
         ]
       })
     ]);
+  });
+
+  it("labels a probe that ran out of budget separately from one that failed", async () => {
+    const kimiPath = "/opt/tools/kimi";
+    const strategy = strategyWithoutFallbacks("kimi");
+    // What `execFile`'s own `timeout` produces: an error carrying `killed`.
+    const probe: LocalAcpAgentProbe = async () => {
+      const error = Object.assign(new Error("Command failed"), { killed: true });
+      throw error;
+    };
+
+    const groups = await discoverLocalAcpAgentInstances({
+      includeRejectedCandidates: true,
+      probe,
+      strategies: [strategy],
+      listExecutables: listFrom({ kimi: [kimiPath] })
+    });
+
+    expect(groups[0]?.rejectedInstances).toEqual([
+      {
+        command: kimiPath,
+        source: "path",
+        // NOT `version-probe-failed`: the CLI never got to answer, so this is
+        // not a verdict on whether it is installed or ACP-capable.
+        reason: "probe-timed-out"
+      }
+    ]);
+  });
+
+  it("hands the probe its budget so an injected probe can honor it", async () => {
+    const seen: Array<number | undefined> = [];
+    const probe: LocalAcpAgentProbe = async (_command, args, options) => {
+      seen.push(options?.timeoutMs);
+      return { stdout: args.includes("--version") ? "0.11.0" : "kimi acp" };
+    };
+
+    await discoverLocalAcpAgentInstances({
+      probe,
+      probeTimeoutMs: 1_234,
+      strategies: [strategyWithoutFallbacks("kimi")],
+      listExecutables: listFrom({ kimi: ["/opt/tools/kimi"] })
+    });
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(new Set(seen)).toEqual(new Set([1_234]));
+  });
+
+  it("defaults the probe budget to DEFAULT_ACP_PROBE_TIMEOUT_MS", async () => {
+    const seen: Array<number | undefined> = [];
+    const probe: LocalAcpAgentProbe = async (_command, args, options) => {
+      seen.push(options?.timeoutMs);
+      return { stdout: args.includes("--version") ? "0.11.0" : "kimi acp" };
+    };
+
+    await discoverLocalAcpAgentInstances({
+      probe,
+      strategies: [strategyWithoutFallbacks("kimi")],
+      listExecutables: listFrom({ kimi: ["/opt/tools/kimi"] })
+    });
+
+    expect(new Set(seen)).toEqual(new Set([DEFAULT_ACP_PROBE_TIMEOUT_MS]));
+  });
+
+  it("stops probing further candidates once the caller aborts", async () => {
+    const probed: string[] = [];
+    const controller = new AbortController();
+    const probe: LocalAcpAgentProbe = async (command, args) => {
+      probed.push(command);
+      controller.abort();
+      if (args.includes("--version")) return { stdout: "0.11.0" };
+      throw new Error("no acp");
+    };
+
+    const groups = await discoverLocalAcpAgentInstances({
+      probe,
+      signal: controller.signal,
+      strategies: [strategyWithoutFallbacks("kimi")],
+      listExecutables: listFrom({ kimi: ["/opt/a/kimi", "/opt/b/kimi", "/opt/c/kimi"] })
+    });
+
+    expect(new Set(probed)).toEqual(new Set(["/opt/a/kimi"]));
+    expect(groups).toEqual([]);
   });
 
   it("keeps rejected candidates alongside usable instances", async () => {

@@ -57,6 +57,9 @@ export type CodexAuthStatusResponse = {
   codexHome: string;
   authenticated: boolean;
   status: "authenticated" | "unauthenticated" | "failed";
+  /** Set when `status` is `failed` because `codex login status` did not answer
+   *  within its budget — the profile's real state is UNKNOWN, not broken. */
+  timedOut?: boolean;
   detail?: string;
   /** ChatGPT account email extracted from the JWT in `auth.json`, when present. */
   email?: string;

@@ -1,0 +1,12 @@
+---
+"@pwrdrvr/codex-discovery": minor
+"@pwrdrvr/agent-acp": minor
+---
+
+Report a probe that ran out of time as "did not answer in time" instead of "not installed", and let callers own the budget.
+
+`codex-discovery`: the `<command> --version` probe no longer hardcodes 2s. `DEFAULT_COMMAND_VERSION_TIMEOUT_MS` (10s) is exported and overridable per call via `versionTimeoutMs` on `DiscoverCommandOptions`, `discoverCodexCommands`, and `resolveCodexCommand`; 2s sat on top of a warm npm `codex.cmd` (~1.5s for its `cmd.exe → node → shim` chain), so a loaded machine crossed it. The now-exported `readCommandVersion` returns a `CommandVersionProbeOutcome` (`ok`, `version_not_reported`, `not_found`, `not_executable`, `timed_out`, `aborted`, `failed`), and that outcome rides on every discovery candidate and on `ResolvedCommandCandidate`, so a consumer gating on version can tell an unfinished measurement from a missing CLI and re-probe on its own budget (`isUnprovenVersionProbe` names that set). A timed-out candidate is no longer labelled `not_executable`, and is no longer filtered out of the snapshot. `CodexCliNotInstalledError` carries `timedOutCommands` / `probeTimedOut` when a timeout — not a missing binary — is why nothing resolved. All entry points accept an `AbortSignal`; an aborted run yields a snapshot with `error: COMMAND_DISCOVERY_ABORTED` (and `CodexDiscoveryAbortedError` from `resolveCodexCommand`) rather than a false "not installed". `collectCodexStatus` / `checkCodexAuthStatus` gain a budget (`DEFAULT_CODEX_STATUS_TIMEOUT_MS`, 10s) where they previously had none at all and could hang forever, and report `outcome` / `timedOut` so a slow check is not read as a signed-out profile.
+
+`agent-acp`: `AcpConnection.request` now enforces the `timeoutMs` it has always accepted and silently ignored — an agent that took a request and went quiet hung the caller indefinitely, including the 30s `initialize` and 1h `session/prompt` budgets `AcpAgentClient` passes. Local discovery's probe budget is configurable via `probeTimeoutMs` (`DEFAULT_ACP_PROBE_TIMEOUT_MS`, unchanged at 5s) with `AbortSignal` support, and a probe that overran is reported as `reason: "probe-timed-out"` rather than `version-probe-failed`.
+
+Both packages' probes now settle within their budget even when the child cannot be killed — on Windows a `.cmd` shim runs under `cmd.exe`, and killing the wrapper can leave a `node` grandchild holding the stdio pipes open, so waiting on process exit could hang past any timeout.

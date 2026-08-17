@@ -30,14 +30,59 @@ import type {
 const LOGIN_URL_TIMEOUT_MS = 8_000;
 
 /**
+ * Budget for `codex login status`, in ms. Same reasoning as the discovery
+ * version probe: the CLI may be an npm `.cmd` shim (`cmd.exe -> node -> shim`)
+ * and this one also reads `auth.json` and can touch the network, so it is
+ * sized for the slow path. Before this existed the spawn had NO budget — a
+ * wedged child hung the caller forever.
+ */
+export const DEFAULT_CODEX_STATUS_TIMEOUT_MS = 10_000;
+
+/** How a `codex login status` probe ended. `timed_out` says the CLI did not
+ *  answer within the budget — NOT that the profile is unauthenticated. */
+export type CodexStatusOutcome =
+  | "answered"
+  | "timed_out"
+  | "aborted"
+  | "spawn_failed";
+
+export type CodexStatusResult = {
+  /** Process exit code; `null` when the CLI never got to report one. */
+  code: number | null;
+  detail: string;
+  outcome: CodexStatusOutcome;
+};
+
+export type CollectCodexStatusOptions = {
+  /** Defaults to `DEFAULT_CODEX_STATUS_TIMEOUT_MS`. */
+  timeoutMs?: number | undefined;
+  /** Abandon the probe (app quitting, profile switched away). */
+  signal?: AbortSignal | undefined;
+};
+
+/**
  * Spawn `codex login status` for a CODEX_HOME and report the raw exit code +
  * combined stdout/stderr. Exit 0 means authenticated.
+ *
+ * Never hangs: it settles within `timeoutMs`, and `outcome` says whether the
+ * CLI actually answered so a caller does not read a slow machine as a signed-
+ * out one.
  */
 export function collectCodexStatus(
   command: string,
   codexHome: string,
-): Promise<{ code: number | null; detail: string }> {
+  options: CollectCodexStatusOptions = {},
+): Promise<CodexStatusResult> {
+  const timeoutMs = Math.max(
+    1,
+    Math.floor(options.timeoutMs ?? DEFAULT_CODEX_STATUS_TIMEOUT_MS),
+  );
   return new Promise((resolve) => {
+    if (options.signal?.aborted) {
+      resolve({ code: null, detail: "codex login status aborted", outcome: "aborted" });
+      return;
+    }
+
     const env = {
       ...process.env,
       CODEX_HOME: codexHome,
@@ -54,6 +99,32 @@ export function collectCodexStatus(
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     });
     let output = "";
+    let settled = false;
+    const settle = (result: CodexStatusResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    // Resolve on OUR schedule rather than waiting for the child to die: on
+    // Windows the `.cmd` shim runs under `cmd.exe`, so killing it can leave a
+    // `node` grandchild holding the pipes open and `close` never fires.
+    const abandon = (outcome: "timed_out" | "aborted"): void => {
+      child.kill();
+      settle({
+        code: null,
+        detail:
+          outcome === "timed_out"
+            ? `codex login status did not answer within ${timeoutMs}ms`
+            : "codex login status aborted",
+        outcome,
+      });
+    };
+    const timer = setTimeout(() => abandon("timed_out"), timeoutMs);
+    const onAbort = (): void => abandon("aborted");
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
@@ -63,10 +134,10 @@ export function collectCodexStatus(
       output += chunk;
     });
     child.on("error", (error) => {
-      resolve({ code: null, detail: error.message });
+      settle({ code: null, detail: error.message, outcome: "spawn_failed" });
     });
     child.on("close", (code) => {
-      resolve({ code, detail: output.trim() });
+      settle({ code, detail: output.trim(), outcome: "answered" });
     });
   });
 }
@@ -80,8 +151,15 @@ export async function checkCodexAuthStatus(params: {
   command: string;
   codexHome: string;
   profile: string;
+  /** Budget for the `codex login status` spawn. Defaults to
+   *  `DEFAULT_CODEX_STATUS_TIMEOUT_MS`. */
+  timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
 }): Promise<CodexAuthStatusResponse> {
-  const result = await collectCodexStatus(params.command, params.codexHome);
+  const result = await collectCodexStatus(params.command, params.codexHome, {
+    timeoutMs: params.timeoutMs,
+    signal: params.signal,
+  });
   const authenticated = result.code === 0;
   const authInfo = authenticated ? readCodexAuthInfo(params.codexHome) : {};
   return {
@@ -94,6 +172,9 @@ export async function checkCodexAuthStatus(params: {
         : authenticated
           ? "authenticated"
           : "unauthenticated",
+    // `failed` alone reads as "this profile is broken". Flagging the timeout
+    // lets a host say "couldn't check in time" and retry instead.
+    ...(result.outcome === "timed_out" ? { timedOut: true } : {}),
     ...(result.detail ? { detail: result.detail } : {}),
     ...(authInfo.email ? { email: authInfo.email } : {}),
     ...(authInfo.planType ? { planType: authInfo.planType } : {}),
@@ -116,6 +197,9 @@ export type CodexLoginManagerOptions = {
   /** How long to wait for the login prompt's OAuth URL before resolving with
    *  `started: true` anyway. Defaults to 8s; tests set it small. */
   loginUrlTimeoutMs?: number;
+  /** Budget for the `codex login status` re-check run when a login child
+   *  exits. Defaults to `DEFAULT_CODEX_STATUS_TIMEOUT_MS`. */
+  statusTimeoutMs?: number;
 };
 
 export type StartCodexLoginParams = {
@@ -133,12 +217,14 @@ export class CodexLoginManager {
   private readonly logger: Logger;
   private readonly openExternal: OpenExternal;
   private readonly loginUrlTimeoutMs: number;
+  private readonly statusTimeoutMs: number;
   private readonly activeLoginProcesses = new Map<string, ChildProcess>();
 
   constructor(options: CodexLoginManagerOptions = {}) {
     this.logger = options.logger ?? noopLogger;
     this.openExternal = options.openExternal ?? (async () => {});
     this.loginUrlTimeoutMs = options.loginUrlTimeoutMs ?? LOGIN_URL_TIMEOUT_MS;
+    this.statusTimeoutMs = options.statusTimeoutMs ?? DEFAULT_CODEX_STATUS_TIMEOUT_MS;
   }
 
   /**
@@ -240,6 +326,7 @@ export class CodexLoginManager {
             const status = await collectCodexStatus(
               params.command,
               params.codexHome,
+              { timeoutMs: this.statusTimeoutMs },
             );
             if (status.code === 0) {
               resolve({
@@ -290,6 +377,9 @@ export function startCodexProfileLoginProcess(
       ...(options?.openExternal ? { openExternal: options.openExternal } : {}),
       ...(options?.loginUrlTimeoutMs !== undefined
         ? { loginUrlTimeoutMs: options.loginUrlTimeoutMs }
+        : {}),
+      ...(options?.statusTimeoutMs !== undefined
+        ? { statusTimeoutMs: options.statusTimeoutMs }
         : {}),
     });
   return manager.startProfileLogin(params);

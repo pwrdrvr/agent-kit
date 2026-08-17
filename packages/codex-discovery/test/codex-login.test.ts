@@ -92,7 +92,74 @@ describe.skipIf(isWindows)("collectCodexStatus / checkCodexAuthStatus", () => {
       });
       expect(status.status).toBe("failed");
       expect(status.authenticated).toBe(false);
+      // A spawn failure is a verdict; a timeout is not. Only the latter is
+      // flagged so a host can retry rather than declare the profile broken.
+      expect(status.timedOut).toBeUndefined();
     } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("gives up on its own budget instead of hanging on a wedged CLI", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      // `login status` never answers. Before the budget existed this spawn had
+      // NO timeout at all and the caller waited forever.
+      const codex = writeFakeCodex({
+        dir: binDir,
+        body: `#!/bin/sh\nsleep 3\n`,
+      });
+      const startedAt = Date.now();
+      const raw = await collectCodexStatus(codex, codexHome, { timeoutMs: 150 });
+
+      expect(raw.outcome).toBe("timed_out");
+      expect(raw.code).toBeNull();
+      expect(raw.detail).toMatch(/did not answer within 150ms/);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("marks a timed-out auth check as unknown, not as a broken profile", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      const codex = writeFakeCodex({ dir: binDir, body: `#!/bin/sh\nsleep 3\n` });
+      const status = await checkCodexAuthStatus({
+        command: codex,
+        codexHome,
+        profile: "work",
+        timeoutMs: 150,
+      });
+
+      expect(status.status).toBe("failed");
+      expect(status.timedOut).toBe(true);
+      expect(status.authenticated).toBe(false);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("abandons the status probe when the caller's signal fires", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      const codex = writeFakeCodex({ dir: binDir, body: `#!/bin/sh\nsleep 3\n` });
+      const controller = new AbortController();
+      const pending = collectCodexStatus(codex, codexHome, {
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 50);
+
+      const raw = await pending;
+      expect(raw.outcome).toBe("aborted");
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
       rmSync(codexHome, { recursive: true, force: true });
     }
   });

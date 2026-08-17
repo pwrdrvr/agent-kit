@@ -14,9 +14,18 @@ export type LocalAcpProbeResult = {
   stderr?: string | Buffer;
 };
 
+export type LocalAcpProbeOptions = {
+  /** Budget for this probe spawn. An injected probe should honor it so a slow
+   *  CLI is reported as "did not answer in time", not as "not installed". */
+  timeoutMs?: number | undefined;
+  /** Fires when discovery is abandoned mid-probe. */
+  signal?: AbortSignal | undefined;
+};
+
 export type LocalAcpAgentProbe = (
   command: string,
-  args: string[]
+  args: string[],
+  options?: LocalAcpProbeOptions
 ) => Promise<LocalAcpProbeResult>;
 
 /** How a strategy decides it is installed + ACP-capable on this machine. */

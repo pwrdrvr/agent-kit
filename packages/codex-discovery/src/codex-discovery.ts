@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { realpath } from "node:fs/promises";
 import {
+  COMMAND_DISCOVERY_ABORTED,
   discoverCommands,
   pathIsExecutable,
   type ResolvedCommandCandidate,
@@ -246,11 +247,21 @@ function readHomebrewCodexVersionFromPath(candidatePath: string): string | undef
   return match?.[1];
 }
 
-export async function discoverCodexCommands(params?: {
+export type DiscoverCodexCommandsParams = {
   configuredCommand?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   platform?: NodeJS.Platform | undefined;
-}): Promise<CodexDiscoverySnapshot> {
+  /** Budget for each `codex --version` probe. Defaults to
+   *  `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. */
+  versionTimeoutMs?: number | undefined;
+  /** Abandon in-flight probes (discovery re-triggered, app quitting). The
+   *  snapshot then carries `error: COMMAND_DISCOVERY_ABORTED`. */
+  signal?: AbortSignal | undefined;
+};
+
+export async function discoverCodexCommands(
+  params?: DiscoverCodexCommandsParams,
+): Promise<CodexDiscoverySnapshot> {
   const env = params?.env ?? process.env;
   const envOverride = env[CODEX_COMMAND_ENV]?.trim();
   const configuredCommand = params?.configuredCommand?.trim();
@@ -277,6 +288,8 @@ export async function discoverCodexCommands(params?: {
     validateVersion: validateCodexCliVersion,
     preflightCandidate: ({ command, platform }) =>
       inspectCodexCandidateBeforeVersionProbe({ command, platform }),
+    versionTimeoutMs: params?.versionTimeoutMs,
+    signal: params?.signal,
   });
 }
 
@@ -289,9 +302,38 @@ export async function discoverCodexCommands(params?: {
  * repeat the same lookup that already failed.
  */
 export class CodexCliNotInstalledError extends Error {
-  constructor(message = "codex CLI not found on PATH or in known install locations") {
+  /**
+   * Commands whose `--version` probe overran its budget instead of failing
+   * outright. NON-EMPTY means "we could not tell", not "not installed": retry
+   * on a larger `versionTimeoutMs` before telling anyone to install Codex.
+   */
+  readonly timedOutCommands: string[];
+
+  constructor(
+    message = "codex CLI not found on PATH or in known install locations",
+    options: { timedOutCommands?: string[] | undefined } = {},
+  ) {
     super(message);
     this.name = "CodexCliNotInstalledError";
+    this.timedOutCommands = options.timedOutCommands ?? [];
+  }
+
+  /** True when a probe timeout — not a missing binary — is why nothing resolved. */
+  get probeTimedOut(): boolean {
+    return this.timedOutCommands.length > 0;
+  }
+}
+
+/**
+ * Thrown by `resolveCodexCommand` when the caller's `AbortSignal` fired mid-
+ * discovery. Deliberately NOT a `CodexCliNotInstalledError`: an abandoned run
+ * found nothing because it stopped looking, which is not evidence about what
+ * is installed.
+ */
+export class CodexDiscoveryAbortedError extends Error {
+  constructor(message = "codex discovery aborted before a command was resolved") {
+    super(message);
+    this.name = "CodexDiscoveryAbortedError";
   }
 }
 
@@ -299,6 +341,10 @@ export async function resolveCodexCommand(params: {
   command: string;
   env: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
+  /** Budget for each `codex --version` probe. Defaults to
+   *  `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. */
+  versionTimeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
 }): Promise<ResolvedCommandCandidate<CodexCandidateSource>> {
   const configuredCommand =
     params.command.trim() && params.command.trim() !== "codex"
@@ -308,6 +354,8 @@ export async function resolveCodexCommand(params: {
     configuredCommand,
     env: params.env,
     platform: params.platform,
+    versionTimeoutMs: params.versionTimeoutMs,
+    signal: params.signal,
   });
   const selected = discovery.candidates.find((candidate) => candidate.selected);
   const rejectedOldCodex = discovery.candidates.find(
@@ -319,12 +367,32 @@ export async function resolveCodexCommand(params: {
       command: selected.command,
       source: selected.source,
       version: selected.version,
+      // Carries `timed_out` when the command resolved but its version is
+      // UNKNOWN — a version-gating caller should re-probe, not demote it.
+      versionProbeOutcome: selected.versionProbeOutcome,
     };
+  }
+
+  if (discovery.error === COMMAND_DISCOVERY_ABORTED) {
+    throw new CodexDiscoveryAbortedError();
   }
 
   if (rejectedOldCodex) {
     throw new Error(
       `Codex CLI ${rejectedOldCodex.version ?? "unknown"} is older than the minimum supported version ${MINIMUM_CODEX_CLI_VERSION}: ${rejectedOldCodex.command}`,
+    );
+  }
+
+  // A probe that ran out of budget is not evidence of a missing CLI. Keep the
+  // same error type so existing catches still work, but say what actually
+  // happened and hand back the commands worth retrying.
+  const timedOutCommands = discovery.candidates
+    .filter((candidate) => candidate.versionProbeOutcome === "timed_out")
+    .map((candidate) => candidate.command);
+  if (timedOutCommands.length > 0) {
+    throw new CodexCliNotInstalledError(
+      `codex CLI did not answer --version in time (${timedOutCommands.join(", ")}); it may be installed but too slow to confirm`,
+      { timedOutCommands },
     );
   }
 
