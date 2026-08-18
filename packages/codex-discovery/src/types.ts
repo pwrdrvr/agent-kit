@@ -52,11 +52,30 @@ export type CodexAuthStatusRequest = {
   profile: string;
 };
 
+/** How a `codex login status` probe ended. `timed_out` / `aborted` say the CLI
+ *  never answered — NOT that the profile is unauthenticated. */
+export type CodexStatusOutcome =
+  | "answered"
+  | "timed_out"
+  | "aborted"
+  | "spawn_failed";
+
+export type CodexStatusResult = {
+  /** Process exit code; `null` when the CLI never got to report one. */
+  code: number | null;
+  detail: string;
+  outcome: CodexStatusOutcome;
+};
+
 export type CodexAuthStatusResponse = {
   profile: string;
   codexHome: string;
   authenticated: boolean;
   status: "authenticated" | "unauthenticated" | "failed";
+  /** How the underlying `codex login status` probe ended. Only `answered`
+   *  makes `status` a verdict: `timed_out` and `aborted` both mean the
+   *  profile's real state is UNKNOWN, not that it is broken or signed out. */
+  outcome?: CodexStatusOutcome;
   detail?: string;
   /** ChatGPT account email extracted from the JWT in `auth.json`, when present. */
   email?: string;

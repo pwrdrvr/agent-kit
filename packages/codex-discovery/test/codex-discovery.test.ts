@@ -264,6 +264,8 @@ describe.runIf(isWindows)("resolveCodexCommand (.cmd shim)", () => {
         command: codexShim,
         source: "config",
         version: "0.140.0",
+        // The shim answered, so the version is measured rather than assumed.
+        versionProbeOutcome: "ok",
       });
     } finally {
       rmSync(rootDir, { recursive: true, force: true });

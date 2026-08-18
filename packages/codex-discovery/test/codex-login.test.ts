@@ -17,6 +17,19 @@ import {
 
 const isWindows = process.platform === "win32";
 
+/**
+ * A `codex` that accepts any subcommand and never answers.
+ *
+ * Runs under `process.execPath` rather than `#!/bin/sh` + `sleep`: `sleep` is
+ * only resolvable because `collectCodexStatus` happens to spread
+ * `process.env`, so a shell shim would silently become instant (printing
+ * "sleep: command not found") the day that env is scoped down — leaving these
+ * tests passing for the wrong reason.
+ */
+function wedgedCodexBody(): string {
+  return `#!${process.execPath}\nsetTimeout(() => {}, 3000);\n`;
+}
+
 describe("parseCodexLoginPrompt", () => {
   it("scrapes the OAuth authorize URL from output", () => {
     const out =
@@ -92,7 +105,100 @@ describe.skipIf(isWindows)("collectCodexStatus / checkCodexAuthStatus", () => {
       });
       expect(status.status).toBe("failed");
       expect(status.authenticated).toBe(false);
+      // A spawn failure is its own outcome — distinguishable from both a
+      // timeout and a genuine "not logged in".
+      expect(status.outcome).toBe("spawn_failed");
     } finally {
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("gives up on its own budget instead of hanging on a wedged CLI", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      // `login status` never answers. Before the budget existed this spawn had
+      // NO timeout at all and the caller waited forever.
+      const codex = writeFakeCodex({
+        dir: binDir,
+        body: wedgedCodexBody(),
+      });
+      const startedAt = Date.now();
+      const raw = await collectCodexStatus(codex, codexHome, { timeoutMs: 150 });
+
+      expect(raw.outcome).toBe("timed_out");
+      expect(raw.code).toBeNull();
+      expect(raw.detail).toMatch(/did not answer within 150ms/);
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("marks a timed-out auth check as unknown, not as a broken profile", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      const codex = writeFakeCodex({ dir: binDir, body: wedgedCodexBody() });
+      const status = await checkCodexAuthStatus({
+        command: codex,
+        codexHome,
+        profile: "work",
+        timeoutMs: 150,
+      });
+
+      expect(status.status).toBe("failed");
+      expect(status.outcome).toBe("timed_out");
+      expect(status.authenticated).toBe(false);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("abandons the status probe when the caller's signal fires", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      const codex = writeFakeCodex({ dir: binDir, body: wedgedCodexBody() });
+      const controller = new AbortController();
+      const pending = collectCodexStatus(codex, codexHome, {
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 50);
+
+      const raw = await pending;
+      expect(raw.outcome).toBe("aborted");
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a cancelled auth check as aborted, not as a broken profile", async () => {
+    const binDir = makeTempDir();
+    const codexHome = makeTempDir();
+    try {
+      const codex = writeFakeCodex({ dir: binDir, body: wedgedCodexBody() });
+      const controller = new AbortController();
+      const pending = checkCodexAuthStatus({
+        command: codex,
+        codexHome,
+        profile: "work",
+        timeoutMs: 30_000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 50);
+
+      const status = await pending;
+      // Without the outcome a host cannot tell its OWN cancellation apart from
+      // a genuinely signed-out or broken profile.
+      expect(status.outcome).toBe("aborted");
+      expect(status.authenticated).toBe(false);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
       rmSync(codexHome, { recursive: true, force: true });
     }
   });

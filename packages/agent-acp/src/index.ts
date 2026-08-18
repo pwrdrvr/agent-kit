@@ -6,6 +6,7 @@
 // `AgentBackend`, so it unifies with `CodexThreadClient` behind one interface.
 
 export {
+  ACP_REQUEST_TIMEOUT_MESSAGE_PREFIX,
   AcpConnection,
   type AcpConnectionOptions,
   type AcpAgentConnection,
@@ -110,6 +111,7 @@ export {
   type AcpDiscoveryProbe,
   type AcpSpawnSpec,
   type LocalAcpAgentProbe,
+  type LocalAcpProbeOptions,
   type LocalAcpProbeResult,
   buildAcpBackendId,
   defaultQuirks
@@ -127,6 +129,7 @@ export {
 } from "./strategies/index";
 
 export {
+  DEFAULT_ACP_PROBE_TIMEOUT_MS,
   discoverLocalAcpAgents,
   discoverLocalAcpAgentInstances,
   wellKnownAgentBinDirs,

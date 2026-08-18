@@ -94,6 +94,59 @@ describe("AcpConnection — request() maps method strings to library calls", () 
   });
 });
 
+describe("AcpConnection — enforces the per-request budget", () => {
+  it("rejects with a timeout when the agent accepts a request and goes quiet", async () => {
+    // `AcpAgentClient` has always passed a budget here (30s for initialize, 1h
+    // for a prompt); it used to be dropped, so a silent agent hung the caller
+    // forever with no diagnostic.
+    const conn = stubConnection({ prompt: vi.fn(() => new Promise<never>(() => {})) });
+    const { acp } = makeConnection(conn);
+
+    await expect(
+      acp.request("session/prompt", { sessionId: "sess-1" }, 20)
+    ).rejects.toThrow(/acp request timed out after 20ms: session\/prompt/);
+  });
+
+  it("distinguishes a timeout from the agent answering with an error", async () => {
+    const conn = stubConnection({
+      prompt: vi.fn(async () => {
+        throw new Error("agent refused the prompt");
+      })
+    });
+    const { acp } = makeConnection(conn);
+
+    await expect(
+      acp.request("session/prompt", { sessionId: "sess-1" }, 5_000)
+    ).rejects.toThrow(/agent refused the prompt/);
+  });
+
+  it("lets a request that answers inside its budget through untouched", async () => {
+    const conn = stubConnection();
+    const { acp } = makeConnection(conn);
+    expect(await acp.request("initialize", { clientInfo: { name: "x" } }, 5_000)).toEqual({
+      protocolVersion: 1
+    });
+  });
+
+  it("waits indefinitely when no budget is given (unchanged default)", async () => {
+    let release: (() => void) | undefined;
+    const conn = stubConnection({
+      prompt: vi.fn(
+        async () =>
+          await new Promise((resolve) => {
+            release = () => resolve({ stopReason: "end_turn" });
+          })
+      )
+    });
+    const { acp } = makeConnection(conn);
+    const pending = acp.request("session/prompt", { sessionId: "sess-1" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(release).toBeDefined();
+    release?.();
+    expect(await pending).toEqual({ stopReason: "end_turn" });
+  });
+});
+
 describe("AcpConnection — bridges agent→client traffic to onNotification/onRequest", () => {
   it("emits session/update with the full notification payload", async () => {
     const conn = stubConnection();

@@ -79,6 +79,12 @@ export type CodexOneShotClientOptions = {
   threadConfig?: Record<string, unknown>;
   requestTimeoutMs?: number;
   turnTimeoutMs?: number;
+  /** Budget for the `codex --version` probe run during command discovery.
+   *  Defaults to codex-discovery's `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. Raise
+   *  it on machines where the CLI is an npm shim behind a slow launcher: an
+   *  overrun surfaces as `CodexCliNotInstalledError` (with `probeTimedOut`
+   *  set), which reads as a missing CLI unless the caller checks. */
+  commandVersionTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   transportFactory?: CodexOneShotTransportFactory;
   logger?: Logger;
@@ -399,8 +405,19 @@ export class CodexOneShotClient {
     if (this.resolvedCommand !== null) return this.resolvedCommand;
     const resolved = await resolveCodexCommand({
       command: this.options.command ?? "codex",
-      env: this.options.env ?? process.env
+      env: this.options.env ?? process.env,
+      ...(this.options.commandVersionTimeoutMs !== undefined
+        ? { versionTimeoutMs: this.options.commandVersionTimeoutMs }
+        : {})
     });
+    // See CodexThreadClient.resolveCommand: an unproven probe means the
+    // minimum-version gate never ran, so say so rather than spawning silently.
+    if (resolved.version === undefined && resolved.versionProbeOutcome !== undefined) {
+      this.logger.warn("codex version unverified; minimum-version gate skipped", {
+        command: resolved.command,
+        versionProbeOutcome: resolved.versionProbeOutcome
+      });
+    }
     this.resolvedCommand = resolved.command;
     return resolved.command;
   }
