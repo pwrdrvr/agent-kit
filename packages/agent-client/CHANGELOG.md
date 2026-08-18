@@ -1,5 +1,12 @@
 # @pwrdrvr/agent-client
 
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [2091170]
+  - @pwrdrvr/codex-discovery@0.4.0
+
 ## 0.8.1
 
 ### Patch Changes
