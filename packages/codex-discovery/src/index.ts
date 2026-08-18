@@ -15,6 +15,7 @@ export {
   type CommandVersionProbeResult,
   type ReadCommandVersionOptions,
   type ResolvedCommandCandidate,
+  type PathIsExecutableOptions,
   COMMAND_DISCOVERY_ABORTED,
   DEFAULT_COMMAND_VERSION_TIMEOUT_MS,
   buildCommandDiscoveryCandidate,

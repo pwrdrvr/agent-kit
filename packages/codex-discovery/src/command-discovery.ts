@@ -8,6 +8,10 @@
 // and larger, it settles within that budget, it can be cancelled, and it says
 // WHY it ended (see `CommandVersionProbeOutcome`) so a slow machine is never
 // reported as a machine without the tool installed.
+//
+// Windows name resolution has diverged too: PATHEXT variants are tried instead
+// of the bare command name, and executability is judged by extension rather
+// than by `access(X_OK)` — see `buildPathCommandNames` and `pathIsExecutable`.
 
 import { execFile as execFileCallback } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
@@ -186,7 +190,36 @@ async function pathExists(candidate: string): Promise<"exists" | "not_found" | "
   }
 }
 
-export async function pathIsExecutable(candidate: string): Promise<boolean> {
+export type PathIsExecutableOptions = {
+  env?: NodeJS.ProcessEnv | undefined;
+  platform?: NodeJS.Platform | undefined;
+};
+
+/**
+ * Is this path something the OS could actually launch?
+ *
+ * POSIX asks the filesystem (`X_OK`). Windows cannot: it has no execute bit,
+ * so `access(X_OK)` degrades to `F_OK` and answers "true" for every file that
+ * exists — a README included. There, startability is carried by the EXTENSION
+ * instead, which is the same rule `CreateProcess` and `cmd.exe` apply, so we
+ * check the name against PATHEXT and confirm existence separately.
+ *
+ * `options` is optional purely for back-compat with the original
+ * `pathIsExecutable(path)` signature; without it the win32 branch falls back
+ * to `process.env` and the default PATHEXT.
+ */
+export async function pathIsExecutable(
+  candidate: string,
+  options?: PathIsExecutableOptions,
+): Promise<boolean> {
+  const platform = options?.platform ?? process.platform;
+  if (platform === "win32") {
+    if (!hasExecutableExtension(candidate, options?.env ?? process.env)) {
+      return false;
+    }
+    return (await pathExists(candidate)) === "exists";
+  }
+
   try {
     await access(candidate, fsConstants.X_OK);
     return true;
@@ -199,13 +232,40 @@ function commandHasPathSeparator(command: string): boolean {
   return command.includes("/") || command.includes("\\");
 }
 
+/** Windows env vars are case-insensitive; a synthesized env may spell it
+ *  `Path` / `PathExt`. Look the name up case-insensitively there. */
+function readWindowsEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const key = Object.keys(env).find(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  return key ? env[key] : undefined;
+}
+
 function readPathEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string | undefined {
   if (platform !== "win32") {
     return env.PATH;
   }
 
-  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
-  return pathKey ? env[pathKey] : undefined;
+  return readWindowsEnv(env, "PATH");
+}
+
+/** PATHEXT split into normalized, dot-prefixed extensions. The fallback is the
+ *  Windows default for a machine that somehow has no PATHEXT set. */
+function readPathExtensions(env: NodeJS.ProcessEnv): string[] {
+  const rawExtensions = readWindowsEnv(env, "PATHEXT")?.trim() || ".COM;.EXE;.BAT;.CMD";
+  return rawExtensions
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter(Boolean)
+    .map((extension) => (extension.startsWith(".") ? extension : `.${extension}`));
+}
+
+function hasExecutableExtension(candidate: string, env: NodeJS.ProcessEnv): boolean {
+  const extension = path.win32.extname(candidate).toLowerCase();
+  return (
+    extension.length > 0
+    && readPathExtensions(env).some((known) => known.toLowerCase() === extension)
+  );
 }
 
 function normalizePathEntry(entry: string): string {
@@ -214,7 +274,29 @@ function normalizePathEntry(entry: string): string {
   return quoted?.[1] ?? trimmed;
 }
 
-function buildPathCommandNames(
+/**
+ * The filenames to look for, in the order the PATH scan should try them.
+ *
+ * ORDER IS THE WHOLE POINT ON WINDOWS. npm installs three shims side by side —
+ * `codex` (an sh script, for Git Bash), `codex.cmd`, and `codex.ps1` — so any
+ * npm / nvm-windows bin dir contains an extensionless file with the command's
+ * exact name. That file is not startable on Windows: `CreateProcess` (and so
+ * `child_process`) appends `.exe` to an extensionless name, and PATHEXT is how
+ * the OS decides what a name means. Trying the bare name first therefore
+ * stopped the scan on the sh script and never reached `codex.cmd`, reporting a
+ * present, working tool as missing.
+ *
+ * So on win32 the bare name is not a candidate at all — with one exception: a
+ * command that carries some OTHER extension (`tool.ps1`) names a specific file
+ * the caller asked for, and is kept as a last resort so it stays discoverable.
+ *
+ * POSIX is unchanged: the bare name is correct and the only option there.
+ *
+ * Package-internal (not re-exported from the index): exported only so the
+ * ordering can be asserted on a non-Windows host, where the real PATH scan's
+ * `path.win32.join` cannot match a POSIX temp file.
+ */
+export function buildPathCommandNames(
   command: string,
   env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform,
@@ -223,22 +305,13 @@ function buildPathCommandNames(
     return [command];
   }
 
-  const rawExtensions = env.PATHEXT?.trim() || ".COM;.EXE;.BAT;.CMD";
-  const extensions = rawExtensions
-    .split(";")
-    .map((extension) => extension.trim())
-    .filter(Boolean)
-    .map((extension) => (extension.startsWith(".") ? extension : `.${extension}`));
-  const commandExtension = path.win32.extname(command).toLowerCase();
-
-  if (
-    commandExtension &&
-    extensions.some((extension) => extension.toLowerCase() === commandExtension)
-  ) {
+  // Already a launchable name (`codex.cmd`) — nothing to expand.
+  if (hasExecutableExtension(command, env)) {
     return [command];
   }
 
-  return [command, ...extensions.map((extension) => `${command}${extension}`)];
+  const expanded = readPathExtensions(env).map((extension) => `${command}${extension}`);
+  return path.win32.extname(command) ? [...expanded, command] : expanded;
 }
 
 async function resolvePathCommand(
@@ -474,7 +547,7 @@ export async function buildCommandDiscoveryCandidate<Source extends string>(
   const existence = resolvedCommand ? await pathExists(resolvedCommand) : "unknown";
   const accessExecutable =
     resolvedCommand && existence !== "not_found"
-      ? await pathIsExecutable(resolvedCommand)
+      ? await pathIsExecutable(resolvedCommand, { env: options.env, platform })
       : false;
   const preflightResult = existence !== "not_found"
     ? await options.preflightCandidate?.({
