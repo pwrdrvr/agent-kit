@@ -134,19 +134,34 @@ function validateCodexCliVersion(version: string): string | undefined {
  * `Codex.app` resource bundles plus common Homebrew prefixes, Linux gets the
  * standard FHS dirs plus the common user-local Node/Rust/Bun toolchain
  * locations that aren't typically on an Electron-spawned process's PATH.
- * Returned in priority order (system-wide first, user-local second) so the
- * discovery prefers the canonical install when both are present.
+ * Note that this order does NOT decide which install wins: `discoverCommands`
+ * ranks auto-candidates by version (newest first), so list order only breaks
+ * ties between equal versions. Callers that must pin a specific binary should
+ * use the `config` command or the `PWRDRVR_CODEX_COMMAND` env override, both
+ * of which outrank every auto-candidate.
  */
 export function getCodexInstallCandidatePaths(
   platform: NodeJS.Platform,
-  homeDir = os.homedir(),
+  homeDir?: string,
 ): string[] {
+  // Resolved here rather than through a default parameter: a default only
+  // fires on `undefined`, and this is public API. An empty string (a host
+  // writing `process.env.HOME ?? ""`, or `os.homedir()` itself when HOME is
+  // set but empty) would otherwise yield relative entries like
+  // `.local/bin/codex`, which discovery resolves — and executes — against
+  // `process.cwd()`.
+  const home = homeDir?.trim() ? homeDir : os.homedir();
+  // Join with the rules of the platform being described, not the host's: the
+  // `platform` argument makes cross-platform calls legitimate, and
+  // `command-discovery` already applies the target platform's path semantics
+  // when it probes these candidates.
+  const join = platform === "win32" ? path.win32.join : path.posix.join;
   if (platform === "darwin") {
     return [
       "/Applications/ChatGPT.app/Contents/Resources/codex",
       "/Applications/Codex.app/Contents/Resources/codex",
-      path.join(homeDir, "Applications/ChatGPT.app/Contents/Resources/codex"),
-      path.join(homeDir, "Applications/Codex.app/Contents/Resources/codex"),
+      join(home, "Applications/ChatGPT.app/Contents/Resources/codex"),
+      join(home, "Applications/Codex.app/Contents/Resources/codex"),
       "/opt/homebrew/bin/codex",
       "/usr/local/bin/codex",
     ];
@@ -168,14 +183,14 @@ export function getCodexInstallCandidatePaths(
       // language toolchain bin dirs (npm-global, pnpm, bun, cargo),
       // so these need explicit auto-candidates to be discoverable
       // without the operator setting CODEX_COMMAND or `PATH`.
-      path.join(homeDir, ".local/bin/codex"),
-      path.join(homeDir, ".npm-global/bin/codex"),
-      path.join(homeDir, ".local/share/pnpm/codex"),
-      path.join(homeDir, ".bun/bin/codex"),
-      path.join(homeDir, ".cargo/bin/codex"),
+      join(home, ".local/bin/codex"),
+      join(home, ".npm-global/bin/codex"),
+      join(home, ".local/share/pnpm/codex"),
+      join(home, ".bun/bin/codex"),
+      join(home, ".cargo/bin/codex"),
       // Linuxbrew on Linux. Two common prefixes:
       "/home/linuxbrew/.linuxbrew/bin/codex",
-      path.join(homeDir, ".linuxbrew/bin/codex"),
+      join(home, ".linuxbrew/bin/codex"),
     ];
   }
   if (platform === "win32") {
@@ -184,8 +199,8 @@ export function getCodexInstallCandidatePaths(
     // symmetric. The npm-global `.cmd` shim is what gets executed by
     // `spawn` on win32.
     return [
-      path.join(homeDir, "AppData/Roaming/npm/codex.cmd"),
-      path.join(homeDir, "AppData/Local/Programs/codex/codex.exe"),
+      join(home, "AppData/Roaming/npm/codex.cmd"),
+      join(home, "AppData/Local/Programs/codex/codex.exe"),
     ];
   }
   // Other Unix flavors (freebsd, openbsd, sunos) — fall back to the FHS
@@ -248,21 +263,21 @@ function readHomebrewCodexVersionFromPath(candidatePath: string): string | undef
 }
 
 /**
- * Seam over the well-known install locations probed as auto-candidates
- * alongside the PATH lookup. Both fields are optional and default to today's
- * behavior, so existing callers are unaffected.
- *
- * Hosts can use it to narrow or extend the platform defaults; tests use it to
- * make discovery hermetic — without it, a real Codex CLI sitting at one of the
- * hardcoded paths (`/usr/local/bin/codex` is shared by the macOS and Linux
- * lists) gets discovered and outranks the fixture the test just wrote, so
- * "nothing is installed" cases can never be exercised on a developer machine.
+ * Narrows or redirects the well-known install locations probed as
+ * auto-candidates alongside the PATH lookup. Both fields are optional and
+ * default to today's behavior, so existing callers are unaffected.
  */
 export type CodexInstallCandidateOptions = {
   /**
-   * Install locations to probe, replacing the platform defaults. Defaults to
-   * `getCodexInstallCandidatePaths(platform, homeDir)`. Pass `[]` to probe
-   * nothing but PATH and the caller-supplied env/config commands.
+   * Install locations to probe, *replacing* (not extending) the platform
+   * defaults. Defaults to `getCodexInstallCandidatePaths(platform, homeDir)`;
+   * to extend instead, spread that helper's result into your own list. Pass
+   * `[]` to probe nothing but PATH and the caller-supplied env/config
+   * commands.
+   *
+   * Entries must be absolute paths. A bare name is resolved through `PATH`
+   * like any other command, which reports it as an `application` candidate at
+   * whatever path the lookup happened to find.
    */
   installCandidatePaths?: readonly string[] | undefined;
   /**
@@ -293,6 +308,9 @@ export async function discoverCodexCommands(
   const configuredCommand = params?.configuredCommand?.trim();
 
   const resolvedPlatform = params?.platform ?? process.platform;
+  // An explicit list replaces the defaults outright, which is also why
+  // `homeDir` — whose only job is expanding the default list's user-local
+  // entries — has nothing to act on once one is supplied.
   const installCandidatePaths =
     params?.installCandidatePaths
     ?? getCodexInstallCandidatePaths(resolvedPlatform, params?.homeDir);
@@ -326,9 +344,11 @@ export async function discoverCodexCommands(
  * Thrown by `resolveCodexCommand` when discovery finds no executable
  * Codex CLI on this machine. Callers catch this to surface a clean
  * "Codex CLI not installed" state instead of attempting a spawn that
- * would `ENOENT`. Discovery already searched PATH plus the platform-
- * specific install locations, so a `spawn("codex")` fallback would just
- * repeat the same lookup that already failed.
+ * would `ENOENT`. Discovery already searched PATH plus whichever install
+ * locations were in scope, so a `spawn("codex")` fallback would just repeat
+ * the same lookup that already failed. Note that a caller which narrowed
+ * `installCandidatePaths` narrowed that search too: this error then means
+ * "not found where you told us to look", not "not installed".
  */
 export class CodexCliNotInstalledError extends Error {
   /**
@@ -339,7 +359,7 @@ export class CodexCliNotInstalledError extends Error {
   readonly timedOutCommands: string[];
 
   constructor(
-    message = "codex CLI not found on PATH or in known install locations",
+    message = "codex CLI not found on PATH or in the install locations that were searched",
     options: { timedOutCommands?: string[] | undefined } = {},
   ) {
     super(message);
@@ -370,25 +390,23 @@ export async function resolveCodexCommand(
   params: {
     command: string;
     env: NodeJS.ProcessEnv;
-    platform?: NodeJS.Platform;
+    platform?: NodeJS.Platform | undefined;
     /** Budget for each `codex --version` probe. Defaults to
      *  `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. */
     versionTimeoutMs?: number | undefined;
     signal?: AbortSignal | undefined;
   } & CodexInstallCandidateOptions,
 ): Promise<ResolvedCommandCandidate<CodexCandidateSource>> {
+  // Spread rather than copy field-by-field: `command` is the only key that
+  // needs translating, so `env`, `platform`, the probe budget/signal and the
+  // install-candidate options all reach discovery without being re-listed —
+  // and anything added to those groups later does too.
+  const { command, ...forwarded } = params;
   const configuredCommand =
-    params.command.trim() && params.command.trim() !== "codex"
-      ? params.command.trim()
-      : undefined;
+    command.trim() && command.trim() !== "codex" ? command.trim() : undefined;
   const discovery = await discoverCodexCommands({
+    ...forwarded,
     configuredCommand,
-    env: params.env,
-    platform: params.platform,
-    versionTimeoutMs: params.versionTimeoutMs,
-    signal: params.signal,
-    installCandidatePaths: params.installCandidatePaths,
-    homeDir: params.homeDir,
   });
   const selected = discovery.candidates.find((candidate) => candidate.selected);
   const rejectedOldCodex = discovery.candidates.find(
