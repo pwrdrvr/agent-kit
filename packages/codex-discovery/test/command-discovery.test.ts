@@ -14,6 +14,10 @@ import {
   resolveDiscoveredCommand,
   pathIsExecutable,
 } from "../src/index";
+// Not part of the package's public surface — imported directly so the win32
+// name ORDER can be asserted on any host. The end-to-end resolution below
+// needs a real win32 filesystem; the ordering rule does not.
+import { buildPathCommandNames } from "../src/command-discovery";
 import { makeTempDir } from "./helpers";
 
 const isWindows = process.platform === "win32";
@@ -99,6 +103,61 @@ describe.skipIf(isWindows)("discoverCommands (PATH resolution)", () => {
 // assert the host-independent slice of the behavior — that the win32 branch is
 // taken and a candidate is produced — and run the full resolution assertion
 // only on win32.
+// npm installs three shims side by side: `codex` (an sh script for Git Bash),
+// `codex.cmd`, and `codex.ps1`. On Windows the extensionless one is not
+// startable, so it must never win the scan — the whole "Codex is installed but
+// discovery says it is missing" bug is this ordering.
+describe("buildPathCommandNames (win32 name order)", () => {
+  const PATHEXT = ".COM;.EXE;.BAT;.CMD";
+
+  it("never offers the bare extensionless name on win32", () => {
+    const names = buildPathCommandNames("codex", { PATHEXT }, "win32");
+    expect(names).not.toContain("codex");
+    expect(names).toEqual(["codex.COM", "codex.EXE", "codex.BAT", "codex.CMD"]);
+  });
+
+  it("leaves a name that already carries a PATHEXT extension alone", () => {
+    expect(buildPathCommandNames("codex.cmd", { PATHEXT }, "win32")).toEqual([
+      "codex.cmd",
+    ]);
+    // Case-insensitive against PATHEXT.
+    expect(buildPathCommandNames("codex.CMD", { PATHEXT }, "win32")).toEqual([
+      "codex.CMD",
+    ]);
+  });
+
+  it("keeps a non-PATHEXT extension as a last resort, never first", () => {
+    // `.PS1` is not in the default PATHEXT, so `codex.ps1` is not startable —
+    // but the caller named a specific file, so it stays discoverable, last.
+    const names = buildPathCommandNames("codex.ps1", { PATHEXT }, "win32");
+    expect(names.at(-1)).toBe("codex.ps1");
+    expect(names[0]).toBe("codex.ps1.COM");
+  });
+
+  it("reads PATHEXT case-insensitively and normalizes bare extensions", () => {
+    expect(buildPathCommandNames("codex", { PathExt: "EXE;.cmd" }, "win32")).toEqual([
+      "codex.EXE",
+      "codex.cmd",
+    ]);
+  });
+
+  it("falls back to the Windows default when PATHEXT is unset", () => {
+    expect(buildPathCommandNames("codex", {}, "win32")).toEqual([
+      "codex.COM",
+      "codex.EXE",
+      "codex.BAT",
+      "codex.CMD",
+    ]);
+  });
+
+  it("leaves POSIX resolution untouched — the bare name is the only option", () => {
+    expect(buildPathCommandNames("codex", { PATHEXT }, "linux")).toEqual(["codex"]);
+    expect(buildPathCommandNames("codex", { PATHEXT }, "darwin")).toEqual(["codex"]);
+    // A dotted name is NOT an extension to expand off win32.
+    expect(buildPathCommandNames("python3.11", {}, "linux")).toEqual(["python3.11"]);
+  });
+});
+
 describe.runIf(isWindows)("Windows PATHEXT expansion (win32 host)", () => {
   it("expands a bare command to PATHEXT variants and resolves the .cmd shim", async () => {
     const binDir = mkdtempSync(path.join(tmpdir(), "cmddisc-win-"));
@@ -119,6 +178,34 @@ describe.runIf(isWindows)("Windows PATHEXT expansion (win32 host)", () => {
       expect(candidate?.command.toLowerCase()).toBe(cmdShim.toLowerCase());
       expect(candidate?.executable).toBe(true);
       expect(candidate?.version).toBe("2.0.0");
+      expect(snapshot.selectedCommand?.toLowerCase()).toBe(cmdShim.toLowerCase());
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves codex.cmd past the extensionless sh shim npm installs beside it", async () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), "cmddisc-win-"));
+    try {
+      // Exactly the layout `where codex` reports on an nvm-windows install:
+      // the sh script first, the runnable shim second.
+      writeFileSync(path.join(binDir, "codex"), "#!/bin/sh\necho nope\n", "utf8");
+      const cmdShim = path.join(binDir, "codex.cmd");
+      writeFileSync(cmdShim, "@echo codex-cli 0.146.0\n", "utf8");
+
+      const snapshot = await discoverCommands<"path">({
+        env: { Path: binDir, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+        platform: "win32",
+        fixedCandidates: [],
+        autoCandidates: [{ command: "codex", source: "path" }],
+        parseVersion: parseSimpleVersion,
+        includeFailedAutoCandidates: true,
+      });
+
+      const candidate = snapshot.candidates.find((c) => c.source === "path");
+      expect(candidate?.command.toLowerCase()).toBe(cmdShim.toLowerCase());
+      expect(candidate?.executable).toBe(true);
+      expect(candidate?.version).toBe("0.146.0");
       expect(snapshot.selectedCommand?.toLowerCase()).toBe(cmdShim.toLowerCase());
     } finally {
       rmSync(binDir, { recursive: true, force: true });
@@ -260,6 +347,36 @@ describe.skipIf(isWindows)("pathIsExecutable", () => {
       expect(await pathIsExecutable(exe)).toBe(true);
       expect(await pathIsExecutable(notExe)).toBe(false);
       expect(await pathIsExecutable(path.join(dir, "missing"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// `access(X_OK)` is meaningless on Windows — it degrades to "does this file
+// exist", so it answers true for a README. Startability there is the
+// extension, and these assertions run on any host because the function is
+// handed an already-resolved path (no win32 path joining involved).
+describe("pathIsExecutable (win32 semantics)", () => {
+  it("judges by PATHEXT, not by the (absent) execute bit", async () => {
+    const dir = makeTempDir();
+    try {
+      const shShim = path.join(dir, "codex");
+      writeFileSync(shShim, "#!/bin/sh\n", "utf8");
+      chmodSync(shShim, 0o755);
+      const cmdShim = path.join(dir, "codex.cmd");
+      writeFileSync(cmdShim, "@echo hi\n", "utf8");
+      const readme = path.join(dir, "README.md");
+      writeFileSync(readme, "hi", "utf8");
+
+      const env = { PATHEXT: ".COM;.EXE;.BAT;.CMD" };
+      expect(await pathIsExecutable(cmdShim, { env, platform: "win32" })).toBe(true);
+      // Executable bit set, and still not startable on Windows.
+      expect(await pathIsExecutable(shShim, { env, platform: "win32" })).toBe(false);
+      expect(await pathIsExecutable(readme, { env, platform: "win32" })).toBe(false);
+      expect(
+        await pathIsExecutable(path.join(dir, "missing.cmd"), { env, platform: "win32" }),
+      ).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
