@@ -1,5 +1,13 @@
 # minimal-consumer
 
+## 0.0.9
+
+### Patch Changes
+
+- Updated dependencies [9dee193]
+  - @pwrdrvr/codex-discovery@0.3.0
+  - @pwrdrvr/agent-client@0.8.1
+
 ## 0.0.8
 
 ### Patch Changes
