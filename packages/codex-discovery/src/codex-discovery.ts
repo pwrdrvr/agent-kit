@@ -247,6 +247,32 @@ function readHomebrewCodexVersionFromPath(candidatePath: string): string | undef
   return match?.[1];
 }
 
+/**
+ * Seam over the well-known install locations probed as auto-candidates
+ * alongside the PATH lookup. Both fields are optional and default to today's
+ * behavior, so existing callers are unaffected.
+ *
+ * Hosts can use it to narrow or extend the platform defaults; tests use it to
+ * make discovery hermetic — without it, a real Codex CLI sitting at one of the
+ * hardcoded paths (`/usr/local/bin/codex` is shared by the macOS and Linux
+ * lists) gets discovered and outranks the fixture the test just wrote, so
+ * "nothing is installed" cases can never be exercised on a developer machine.
+ */
+export type CodexInstallCandidateOptions = {
+  /**
+   * Install locations to probe, replacing the platform defaults. Defaults to
+   * `getCodexInstallCandidatePaths(platform, homeDir)`. Pass `[]` to probe
+   * nothing but PATH and the caller-supplied env/config commands.
+   */
+  installCandidatePaths?: readonly string[] | undefined;
+  /**
+   * Home directory used to expand the user-local entries of the default
+   * candidate list. Defaults to `os.homedir()`. Ignored when
+   * `installCandidatePaths` is supplied.
+   */
+  homeDir?: string | undefined;
+};
+
 export type DiscoverCodexCommandsParams = {
   configuredCommand?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
@@ -257,7 +283,7 @@ export type DiscoverCodexCommandsParams = {
   /** Abandon in-flight probes (discovery re-triggered, app quitting). The
    *  snapshot then carries `error: COMMAND_DISCOVERY_ABORTED`. */
   signal?: AbortSignal | undefined;
-};
+} & CodexInstallCandidateOptions;
 
 export async function discoverCodexCommands(
   params?: DiscoverCodexCommandsParams,
@@ -267,6 +293,9 @@ export async function discoverCodexCommands(
   const configuredCommand = params?.configuredCommand?.trim();
 
   const resolvedPlatform = params?.platform ?? process.platform;
+  const installCandidatePaths =
+    params?.installCandidatePaths
+    ?? getCodexInstallCandidatePaths(resolvedPlatform, params?.homeDir);
   return discoverCommands<CodexCandidateSource>({
     env,
     platform: params?.platform,
@@ -276,7 +305,7 @@ export async function discoverCodexCommands(
     ],
     autoCandidates: [
       { command: "codex", source: "path" },
-      ...getCodexInstallCandidatePaths(resolvedPlatform).map(
+      ...installCandidatePaths.map(
         (candidatePath) => ({
           command: candidatePath,
           source: "application" as const,
@@ -337,15 +366,17 @@ export class CodexDiscoveryAbortedError extends Error {
   }
 }
 
-export async function resolveCodexCommand(params: {
-  command: string;
-  env: NodeJS.ProcessEnv;
-  platform?: NodeJS.Platform;
-  /** Budget for each `codex --version` probe. Defaults to
-   *  `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. */
-  versionTimeoutMs?: number | undefined;
-  signal?: AbortSignal | undefined;
-}): Promise<ResolvedCommandCandidate<CodexCandidateSource>> {
+export async function resolveCodexCommand(
+  params: {
+    command: string;
+    env: NodeJS.ProcessEnv;
+    platform?: NodeJS.Platform;
+    /** Budget for each `codex --version` probe. Defaults to
+     *  `DEFAULT_COMMAND_VERSION_TIMEOUT_MS`. */
+    versionTimeoutMs?: number | undefined;
+    signal?: AbortSignal | undefined;
+  } & CodexInstallCandidateOptions,
+): Promise<ResolvedCommandCandidate<CodexCandidateSource>> {
   const configuredCommand =
     params.command.trim() && params.command.trim() !== "codex"
       ? params.command.trim()
@@ -356,6 +387,8 @@ export async function resolveCodexCommand(params: {
     platform: params.platform,
     versionTimeoutMs: params.versionTimeoutMs,
     signal: params.signal,
+    installCandidatePaths: params.installCandidatePaths,
+    homeDir: params.homeDir,
   });
   const selected = discovery.candidates.find((candidate) => candidate.selected);
   const rejectedOldCodex = discovery.candidates.find(

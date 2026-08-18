@@ -5,14 +5,24 @@ import {
   discoverCodexCommands,
   resolveCodexCommand,
   compareCodexCliVersions,
+  getCodexInstallCandidatePaths,
   CodexCliNotInstalledError,
   CODEX_COMMAND_ENV,
   MINIMUM_CODEX_CLI_VERSION,
 } from "../src/index";
-import { getCodexInstallCandidatePaths } from "../src/codex-discovery";
 import { makeTempDir, writeFakeCodex } from "./helpers";
 
 const isWindows = process.platform === "win32";
+
+// Discovery probes hardcoded install locations (`/usr/local/bin/codex` and
+// friends) on top of PATH. A real Codex CLI on the machine running the tests
+// would be discovered, outrank the fixture shims, and make the
+// "nothing installed" cases resolve instead of throwing. So every test that
+// cares about *which* command is selected scopes the auto-candidates to its
+// own temp dirs, or to nothing at all via this constant. The two tests that
+// deliberately exercise the default list assert only on things a real install
+// cannot change.
+const NO_INSTALL_CANDIDATES: readonly string[] = [];
 
 describe("compareCodexCliVersions", () => {
   it("orders releases by major.minor.patch", () => {
@@ -53,6 +63,67 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
     ]);
   });
 
+  it("defaults the auto candidates to the platform install list", async () => {
+    // No `installCandidatePaths` — the default list is what gets probed, so a
+    // path that is not on it can never be discovered.
+    const dir = makeTempDir();
+    try {
+      const cmd = writeFakeCodex({ dir, version: "0.140.0" });
+      expect(getCodexInstallCandidatePaths("linux")).not.toContain(cmd);
+
+      const snapshot = await discoverCodexCommands({
+        env: { PATH: "/nonexistent" },
+        platform: "linux",
+      });
+      expect(snapshot.candidates.map((c) => c.command)).not.toContain(cmd);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("probes an explicit installCandidatePaths list instead of the platform default", async () => {
+    const dir = makeTempDir();
+    try {
+      const cmd = writeFakeCodex({ dir, version: "0.140.0" });
+      const snapshot = await discoverCodexCommands({
+        env: { PATH: "/nonexistent" },
+        platform: "linux",
+        installCandidatePaths: [cmd],
+      });
+      expect(snapshot.selectedCommand).toBe(cmd);
+      expect(snapshot.selectedSource).toBe("application");
+      expect(snapshot.candidates.find((c) => c.selected)?.version).toBe(
+        "0.140.0",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("expands the default user-local candidates against a supplied homeDir", async () => {
+    const home = makeTempDir();
+    try {
+      const binDir = path.join(home, ".local/bin");
+      mkdirSync(binDir, { recursive: true });
+      const cmd = writeFakeCodex({ dir: binDir, version: "0.141.0" });
+      expect(getCodexInstallCandidatePaths("linux", home)).toContain(cmd);
+
+      const snapshot = await discoverCodexCommands({
+        env: { PATH: "/nonexistent" },
+        platform: "linux",
+        homeDir: home,
+      });
+      // Asserted by presence rather than selection: the default list also
+      // covers system paths, where a real Codex install may out-rank the shim.
+      const candidate = snapshot.candidates.find((c) => c.command === cmd);
+      expect(candidate?.source).toBe("application");
+      expect(candidate?.version).toBe("0.141.0");
+      expect(candidate?.executable).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("returns auto candidates newest-first and honors env > config > auto priority", async () => {
     const envDir = makeTempDir();
     const configDir = makeTempDir();
@@ -62,13 +133,15 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
       const envCmd = writeFakeCodex({ dir: envDir, version: "0.140.0" });
       const configCmd = writeFakeCodex({ dir: configDir, version: "0.135.0" });
       // Two "application" candidates with different versions.
-      writeFakeCodex({ dir: appDirA, version: "0.130.0" });
+      const newerApp = writeFakeCodex({ dir: appDirA, version: "0.130.0" });
       const olderApp = writeFakeCodex({ dir: appDirB, version: "0.126.0" });
 
       const snapshot = await discoverCodexCommands({
         configuredCommand: configCmd,
         env: { [CODEX_COMMAND_ENV]: envCmd, PATH: "/nonexistent" },
         platform: "linux",
+        // Deliberately listed oldest-first to prove discovery sorts them.
+        installCandidatePaths: [olderApp, newerApp],
       });
 
       // env wins selection.
@@ -80,12 +153,17 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
       expect(config?.selected).toBe(false);
       expect(env?.version).toBe("0.140.0");
 
-      // Sanity: olderApp is present and not selected.
-      const olderAppCandidate = snapshot.candidates.find(
-        (c) => c.command === olderApp,
+      // Auto candidates come back newest-first, regardless of input order.
+      const appCandidates = snapshot.candidates.filter(
+        (c) => c.source === "application",
       );
-      // It is an "application" path candidate; may be merged but should be visible.
-      expect(olderAppCandidate?.selected ?? false).toBe(false);
+      expect(appCandidates.map((c) => c.command)).toEqual([newerApp, olderApp]);
+      expect(appCandidates.map((c) => c.version)).toEqual([
+        "0.130.0",
+        "0.126.0",
+      ]);
+      // Sanity: neither auto candidate outranks the env override.
+      expect(appCandidates.some((c) => c.selected)).toBe(false);
     } finally {
       for (const d of [envDir, configDir, appDirA, appDirB]) {
         rmSync(d, { recursive: true, force: true });
@@ -101,6 +179,7 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
         configuredCommand: configCmd,
         env: { PATH: "/nonexistent" },
         platform: "linux",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
       expect(snapshot.selectedSource).toBe("config");
       expect(snapshot.selectedCommand).toBe(configCmd);
@@ -116,6 +195,7 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
       const snapshot = await discoverCodexCommands({
         env: { PATH: dir },
         platform: "linux",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
 
       const selectedCandidate = snapshot.candidates.find(
@@ -129,6 +209,7 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
         command: "codex",
         env: { PATH: dir },
         platform: "linux",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
       expect(resolved).toMatchObject({
         command: cmd,
@@ -149,6 +230,7 @@ describe.skipIf(isWindows)("discoverCodexCommands", () => {
         configuredCommand: tooOld,
         env: { PATH: "/nonexistent" },
         platform: "linux",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
       const candidate = snapshot.candidates.find((c) => c.command === tooOld);
       expect(candidate).toBeDefined();
@@ -172,6 +254,7 @@ describe.skipIf(isWindows)("resolveCodexCommand", () => {
         command: cmd,
         env: { PATH: "/nonexistent" },
         platform: "linux",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
       expect(resolved.command).toBe(cmd);
       expect(resolved.version).toBe("0.130.0");
@@ -186,9 +269,11 @@ describe.skipIf(isWindows)("resolveCodexCommand", () => {
       await expect(
         resolveCodexCommand({
           command: "codex",
-          // PATH points at an empty dir; no auto install paths exist on a fresh tmp.
+          // PATH points at an empty dir and no install locations are probed,
+          // so discovery genuinely finds nothing.
           env: { PATH: emptyDir },
           platform: "linux",
+          installCandidatePaths: NO_INSTALL_CANDIDATES,
         }),
       ).rejects.toBeInstanceOf(CodexCliNotInstalledError);
     } finally {
@@ -205,6 +290,7 @@ describe.skipIf(isWindows)("resolveCodexCommand", () => {
           command: tooOld,
           env: { PATH: "/nonexistent" },
           platform: "linux",
+          installCandidatePaths: NO_INSTALL_CANDIDATES,
         }),
       ).rejects.toThrow(new RegExp(MINIMUM_CODEX_CLI_VERSION));
     } finally {
@@ -220,6 +306,7 @@ describe.skipIf(isWindows)("resolveCodexCommand", () => {
         command: cmd,
         env: { PATH: "/nonexistent" },
         platform: "linux",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
       expect(path.basename(resolved.command)).toBe("codex");
     } finally {
@@ -258,6 +345,7 @@ describe.runIf(isWindows)("resolveCodexCommand (.cmd shim)", () => {
         command: codexShim,
         env,
         platform: "win32",
+        installCandidatePaths: NO_INSTALL_CANDIDATES,
       });
 
       expect(resolved).toEqual({
