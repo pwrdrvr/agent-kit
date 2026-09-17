@@ -49,6 +49,7 @@ import {
   acpSessionRuntimeStateFromUpdate,
   mergeAcpRuntimeState,
   modeLabelFor,
+  modelConfigOption,
   modelIdFromCapabilities,
   normalizeAcpRuntimeCapabilities,
   type AcpRuntimeCapabilities,
@@ -70,7 +71,14 @@ export type AcpPromptContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; mimeType: string; data: string };
 
-export type AcpRuntimeOptionSource = "mode" | "model" | "configOption";
+export type AcpRuntimeOptionSource =
+  | "mode"
+  | "model"
+  | "configOption"
+  /** A model write that travels as `session/set_config_option` because the
+   *  agent exposes model choice as a config option rather than via the legacy
+   *  top-level `models` capability. See `setModel`. */
+  | "modelConfigOption";
 
 export type AcpAgentClientOptions = {
   /** The transport (real stdio or a fake). */
@@ -256,8 +264,9 @@ export class AcpAgentClient implements AgentBackend {
    * Public `AgentBackend.startThread`: accepts NEUTRAL `AgentStartThreadOptions`
    * and maps them onto an ACP `session/new`. ACP supports:
    *   • `cwd` → `session/new.cwd`.
-   *   • `model` → applied via `session/set_model` after the session opens, when
-   *     the agent advertises model selection (best-effort; debug-logged if not).
+   *   • `model` → applied after the session opens, by whichever route the agent
+   *     advertises: the `model` config option, or legacy `session/set_model`
+   *     (best-effort; debug-logged if not). See `setModel`.
    *   • `instructions` is NOT injected here — ACP `session/new` has no base-
    *     instructions slot, matching the adapter's existing behavior. A host that
    *     wants system framing sends it as leading turn text.
@@ -753,7 +762,31 @@ export class AcpAgentClient implements AgentBackend {
     await this.setRuntimeOption(threadId, "mode", modeId, modeId);
   }
 
+  /** Apply a model selection by whichever route the agent actually advertises.
+   *
+   *  ACP 1.3 has NO `session/set_model` — it is absent from `AGENT_METHODS`.
+   *  An agent that offers model choice does it through a config option with
+   *  `category: "model"` (Kimi's `session/new` returns exactly that, and nothing
+   *  under `models`). Some agents still accept `session/set_model` as a vendor
+   *  extension, and the `models.availableModels` shape is still honoured for
+   *  them, but it is not what the protocol defines any more.
+   *
+   *  Two reasons to prefer the config option when the agent offers it. The READ
+   *  path already draws this distinction — `modelIdFromCapabilities` and
+   *  `modelsFromCapabilities` both fall back to the config option — and the two
+   *  disagreeing lets a host list models it cannot then select. And the config
+   *  option's REPLY carries the agent's full refreshed config set, where
+   *  `session/set_model` answers `{}` and refreshes only via an async
+   *  notification: on Kimi the model determines which thought levels exist, and
+   *  `applyReasoning` reads `runtimeCapabilities` immediately after this. */
   async setModel(threadId: string, modelId: string): Promise<void> {
+    const advertisesModelsCapability =
+      (this.runtimeCapabilities?.models?.availableModels?.length ?? 0) > 0;
+    const option = modelConfigOption(this.runtimeCapabilities);
+    if (!advertisesModelsCapability && option !== undefined) {
+      await this.setRuntimeOption(threadId, "modelConfigOption", option.id, modelId);
+      return;
+    }
     await this.setRuntimeOption(threadId, "model", modelId, modelId);
   }
 
@@ -985,7 +1018,16 @@ export class AcpAgentClient implements AgentBackend {
         ? { configValues: { [optionId]: value }, updatedAt: this.now() }
         : source === "mode"
           ? { currentModeId: value, updatedAt: this.now() }
-          : { currentModelId: value, updatedAt: this.now() };
+          : source === "modelConfigOption"
+            ? // Record BOTH: it IS the config option's value, and it IS the
+              // session's model. A consumer reading `currentModelId` must not
+              // have to know which route the agent happened to expose.
+              {
+                currentModelId: value,
+                configValues: { [optionId]: value },
+                updatedAt: this.now()
+              }
+            : { currentModelId: value, updatedAt: this.now() };
     session.runtimeState = mergeAcpRuntimeState(session.runtimeState, requested);
     const effectiveCapabilities = runtimeCapabilities ?? this.runtimeCapabilities;
     if (effectiveCapabilities) {
@@ -1006,7 +1048,7 @@ export class AcpAgentClient implements AgentBackend {
     optionId: string,
     value: string
   ): Promise<unknown> {
-    if (source === "configOption") {
+    if (source === "configOption" || source === "modelConfigOption") {
       return await this.transport.request("session/set_config_option", {
         sessionId: protocolSessionId,
         configId: optionId,

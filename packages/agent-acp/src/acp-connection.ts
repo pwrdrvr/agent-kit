@@ -35,7 +35,16 @@ import type { AcpJsonRpcTransport } from "./acp-transport";
  *  drives. Injectable (via `createConnection`) so the adapter can be unit-tested
  *  without spawning a real agent. The library's `ClientSideConnection` satisfies
  *  this structurally (its methods take typed schema params; we pass records that
- *  match at runtime). */
+ *  match at runtime).
+ *
+ *  Every entry here MUST exist on the real `ClientSideConnection`. It is
+ *  attached with an `as unknown as` cast (see `createConnection`), so a name
+ *  that is merely plausible type-checks and then throws
+ *  "conn.<name> is not a function" at runtime, on the wire, against a user's
+ *  agent. `setSessionModel` was such an entry: ACP 1.3 has no `session/set_model`
+ *  at all, so every model selection died before it was sent. Anything the SDK
+ *  does not expose as a typed method belongs in `dispatch`'s default arm, which
+ *  sends it verbatim through `request()`. */
 export interface AcpAgentConnection {
   initialize(params: Record<string, unknown>): Promise<unknown>;
   newSession(params: Record<string, unknown>): Promise<unknown>;
@@ -43,7 +52,6 @@ export interface AcpAgentConnection {
   prompt(params: Record<string, unknown>): Promise<unknown>;
   cancel(params: Record<string, unknown>): Promise<void>;
   setSessionMode(params: Record<string, unknown>): Promise<unknown>;
-  setSessionModel(params: Record<string, unknown>): Promise<unknown>;
   authenticate(params: Record<string, unknown>): Promise<unknown>;
   request(method: string, params: Record<string, unknown>): Promise<unknown>;
   notify(method: string, params: Record<string, unknown>): Promise<void>;
@@ -259,8 +267,9 @@ export class AcpConnection implements AcpJsonRpcTransport {
         return await conn.prompt(params);
       case "session/set_mode":
         return await conn.setSessionMode(params);
-      case "session/set_model":
-        return await conn.setSessionModel(params);
+      // `session/set_model` is deliberately NOT cased here: SDK 1.3 has no
+      // typed `setSessionModel`, so it goes out through the default arm's
+      // generic `request()` for agents still speaking the older method.
       case "session/cancel":
         await conn.cancel(params);
         return {};

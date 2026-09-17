@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { Client } from "@agentclientprotocol/sdk";
+import { ClientSideConnection, type Client } from "@agentclientprotocol/sdk";
 import { AcpConnection, type AcpAgentConnection } from "../src/acp-connection";
 
 /** A stub agent connection capturing calls + returning canned results. */
@@ -14,7 +14,6 @@ function stubConnection(overrides: Partial<AcpAgentConnection> = {}): AcpAgentCo
     prompt: vi.fn(async () => ({ stopReason: "end_turn" })),
     cancel: vi.fn(async () => undefined),
     setSessionMode: vi.fn(async () => ({})),
-    setSessionModel: vi.fn(async () => ({})),
     authenticate: vi.fn(async () => ({})),
     request: vi.fn(async () => ({ ok: true })),
     notify: vi.fn(async () => undefined),
@@ -62,8 +61,12 @@ describe("AcpConnection — request() maps method strings to library calls", () 
     await acp.request("session/prompt", { sessionId: "sess-1", prompt: [] });
     expect(conn.prompt).toHaveBeenCalledWith({ sessionId: "sess-1", prompt: [] });
 
+    // `session/set_model` is NOT a typed SDK method — it rides the generic arm.
     await acp.request("session/set_model", { sessionId: "sess-1", modelId: "m" });
-    expect(conn.setSessionModel).toHaveBeenCalledWith({ sessionId: "sess-1", modelId: "m" });
+    expect(conn.request).toHaveBeenCalledWith("session/set_model", {
+      sessionId: "sess-1",
+      modelId: "m"
+    });
 
     await acp.request("session/set_mode", { sessionId: "sess-1", modeId: "auto" });
     expect(conn.setSessionMode).toHaveBeenCalledWith({ sessionId: "sess-1", modeId: "auto" });
@@ -289,5 +292,38 @@ rl.on("line", (line) => {
       await acp.close();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+/** Every method `AcpAgentConnection` declares, as a runtime list. Kept in step
+ *  with the interface by the two type assertions below — the array may not name
+ *  a key the interface lacks, and `Unlisted` may not resolve to anything. */
+const ACP_CONNECTION_METHODS = [
+  "initialize",
+  "newSession",
+  "loadSession",
+  "prompt",
+  "cancel",
+  "setSessionMode",
+  "authenticate",
+  "request",
+  "notify"
+] as const satisfies readonly (keyof AcpAgentConnection)[];
+
+type Unlisted = Exclude<keyof AcpAgentConnection, (typeof ACP_CONNECTION_METHODS)[number]>;
+const _everyInterfaceMethodIsListed: [Unlisted] extends [never] ? true : never = true;
+void _everyInterfaceMethodIsListed;
+
+describe("AcpAgentConnection is satisfied by the real ClientSideConnection", () => {
+  // `createConnection` attaches the SDK's ClientSideConnection with an
+  // `as unknown as AcpAgentConnection` cast, which erases the structural check.
+  // So a name on the interface that the SDK does not implement type-checks, and
+  // then throws "conn.<name> is not a function" on a user's machine. That
+  // shipped: the interface (and its hand-written stub) carried
+  // `setSessionModel`, which ACP 1.3 does not have, so every ACP model
+  // selection failed before reaching the agent. Assert against the real class,
+  // not a stub that can agree with a wrong interface.
+  it.each(ACP_CONNECTION_METHODS)("ClientSideConnection implements %s", (method) => {
+    expect(typeof ClientSideConnection.prototype[method]).toBe("function");
   });
 });
