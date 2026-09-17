@@ -777,8 +777,10 @@ export class AcpAgentClient implements AgentBackend {
    *  disagreeing lets a host list models it cannot then select. And the config
    *  option's REPLY carries the agent's full refreshed config set, where
    *  `session/set_model` answers `{}` and refreshes only via an async
-   *  notification: on Kimi the model determines which thought levels exist, and
-   *  `applyReasoning` reads `runtimeCapabilities` immediately after this. */
+   *  notification. On Kimi the model DETERMINES which thought levels exist —
+   *  `K2.7 Coding` offers only `on`, `K3` offers `low`/`high`/`max` — and
+   *  `applyReasoning` picks from `runtimeCapabilities` on the following
+   *  `startTurn`, so the refresh this write leaves behind is what it reads. */
   async setModel(threadId: string, modelId: string): Promise<void> {
     const advertisesModelsCapability =
       (this.runtimeCapabilities?.models?.availableModels?.length ?? 0) > 0;
