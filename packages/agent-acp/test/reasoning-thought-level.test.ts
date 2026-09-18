@@ -30,6 +30,27 @@ describe("reasoningValueForThoughtLevel", () => {
     expect(reasoningValueForThoughtLevel("", ON_OFF)).toBeUndefined();
   });
 
+  it("falls back to the LOW graded level when the agent offers no off", () => {
+    // Kimi K3: graded levels, no way to switch thinking off.
+    const graded = [
+      { value: "low", label: "Low" },
+      { value: "high", label: "High" },
+      { value: "max", label: "Max" },
+      { value: "on", label: "On" }
+    ];
+    expect(reasoningValueForThoughtLevel("low", graded)).toBe("low");
+    expect(reasoningValueForThoughtLevel("high", graded)).toBe("high");
+  });
+
+  it("prefers off over a graded low level when both are offered", () => {
+    const both = [
+      { value: "off", label: "Off" },
+      { value: "low", label: "Low" },
+      { value: "high", label: "High" }
+    ];
+    expect(reasoningValueForThoughtLevel("low", both)).toBe("off");
+  });
+
   it("returns undefined when the option has no value of the needed polarity", () => {
     // Only an ON-like value exists → a low-effort request can't be satisfied.
     expect(reasoningValueForThoughtLevel("low", [{ value: "on", label: "On" }])).toBeUndefined();

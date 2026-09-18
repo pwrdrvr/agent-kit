@@ -196,9 +196,11 @@ export function acpRuntimeSupportsSseMcp(
 export function modelConfigOption(
   capabilities: AcpRuntimeCapabilities | undefined
 ): AcpRuntimeConfigOption | undefined {
-  return capabilities?.configOptions?.find(
-    (option) => option.category === "model" || option.id === "model"
-  );
+  return capabilities?.configOptions?.find(isModelConfigOption);
+}
+
+function isModelConfigOption(option: AcpRuntimeConfigOption): boolean {
+  return option.category === "model" || option.id === "model";
 }
 
 /** The effective model id the agent will run with, agnostic of HOW it advertises
@@ -280,6 +282,25 @@ export function acpSessionRuntimeStateFromUpdate(
     return currentModeId ? { currentModeId, updatedAt: now } : undefined;
   }
   if (kind === "config_option_update") {
+    // ACP 1.3 sends the FULL set — `configOptions: SessionConfigOption[]` — so
+    // read every current value, and the model among them: a model changed by
+    // the agent (or by `session/set_model`, which answers `{}` and reports only
+    // here) must not leave a stale `currentModelId` winning in thread settings.
+    const fullSet = update.configOptions ?? update.config_options;
+    if (Array.isArray(fullSet)) {
+      const options = readConfigOptions(fullSet);
+      const configValues = Object.fromEntries(
+        options.flatMap((option) =>
+          option.currentValue !== undefined ? [[option.id, option.currentValue]] : []
+        )
+      );
+      if (Object.keys(configValues).length === 0) return undefined;
+      const state: AcpSessionRuntimeState = { configValues, updatedAt: now };
+      const model = options.find(isModelConfigOption)?.currentValue;
+      if (model !== undefined) state.currentModelId = model;
+      return state;
+    }
+    // Older agents sent the single option that changed.
     const configOption = asRecord(update.configOption ?? update.config_option) ?? update;
     const id =
       readString(configOption, "id") ??
