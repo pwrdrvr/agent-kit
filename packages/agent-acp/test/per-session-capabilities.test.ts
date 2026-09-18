@@ -153,3 +153,130 @@ describe("one pooled client, sessions on different models", () => {
     expect(models.at(-1)).toBe(K3);
   });
 });
+
+describe("a session's menus are its own from the moment it opens", () => {
+  /** An agent that advertises thinking ONLY at initialize — session/new carries
+   *  no menus — so a new session's menus come entirely from its base. */
+  const THINK = (current: string) => [
+    {
+      type: "select",
+      id: "thinking",
+      name: "Thinking",
+      category: "thought_level",
+      currentValue: current,
+      options: [
+        { value: "off", name: "Off" },
+        { value: "on", name: "On" }
+      ]
+    }
+  ];
+
+  class InitializeMenusTransport extends FakeAcpAgentTransport {
+    private sessionCount = 0;
+    override async request(
+      method: string,
+      params?: Record<string, unknown>,
+      timeoutMs?: number
+    ): Promise<unknown> {
+      if (method === "initialize") {
+        await super.request(method, params, timeoutMs);
+        return { protocolVersion: 1, configOptions: THINK("on") };
+      }
+      if (method === "session/new") {
+        await super.request(method, params, timeoutMs);
+        return { sessionId: `session-${++this.sessionCount}` };
+      }
+      if (method === "session/set_config_option") {
+        await super.request(method, params, timeoutMs);
+        return { configOptions: THINK(String(params?.value)) };
+      }
+      return await super.request(method, params, timeoutMs);
+    }
+  }
+
+  it("does not inherit another session's current values when it opens", async () => {
+    const transport = new InitializeMenusTransport();
+    const client = new AcpAgentClient({ transport, strategy: kimiStrategy });
+
+    const first = await client.startThread();
+    await startLowTurn(client, transport, first.threadId); // session-1 → off
+    const second = await client.startThread(); // must start from initialize's "on"
+    await startLowTurn(client, transport, second.threadId);
+
+    // Built on the client-wide snapshot, session-2 opened believing it was
+    // already "off" (session-1's value) and skipped its own write.
+    expect(thinkingWrites(transport)).toEqual([
+      { sessionId: "session-1", configId: "thinking", value: "off" },
+      { sessionId: "session-2", configId: "thinking", value: "off" }
+    ]);
+  });
+
+  it("records a loaded session's menus as its own", async () => {
+    const transport = new FakeAcpAgentTransport({
+      initialize: { protocolVersion: 1, agentCapabilities: { loadSession: true } },
+      "session/load": { configOptions: kimiConfigOptions(K3) },
+      "session/set_config_option": { configOptions: kimiConfigOptions(K3, "low") }
+    });
+    const client = new AcpAgentClient({ transport, strategy: kimiStrategy });
+
+    const loaded = await client.loadThreadNative({ sessionId: "session-9" });
+    await startLowTurn(client, transport, loaded.threadId);
+
+    expect(thinkingWrites(transport)).toEqual([
+      { sessionId: "session-9", configId: "thinking", value: "low" }
+    ]);
+  });
+});
+
+describe("full-set config_option_update, in every spelling", () => {
+  it.each([
+    ["sessionUpdate", { sessionUpdate: "config_option_update", configOptions: kimiConfigOptions(K3) }],
+    ["session_update + config_options", { session_update: "config_option_update", config_options: kimiConfigOptions(K3) }],
+    ["kind", { kind: "config_option_update", configOptions: kimiConfigOptions(K3) }]
+  ])("refreshes the session's menus when keyed by %s", async (_label, update) => {
+    const transport = new KimiLikeTransport();
+    const client = new AcpAgentClient({ transport, strategy: kimiStrategy });
+    const thread = await client.startThread(); // K2.7 — [on] only
+
+    transport.emitSessionUpdate("session-1", update);
+    await startLowTurn(client, transport, thread.threadId);
+
+    // The runtime state and the menus must agree on which updates carry a full
+    // set; a `kind`-keyed one used to update the state and leave the menus stale.
+    expect(thinkingWrites(transport)).toEqual([
+      { sessionId: "session-1", configId: "thinking", value: "low" }
+    ]);
+  });
+});
+
+describe("an option write's reply updates runtime state, not only menus", () => {
+  it("takes the agent's reported values for options the write reshaped", async () => {
+    // Kimi 0.29.2 moved thinking to `high` when the model switched to K3.
+    const transport = new FakeAcpAgentTransport({
+      "session/new": { sessionId: "session-1", configOptions: kimiConfigOptions(K27) },
+      "session/set_config_option": { configOptions: kimiConfigOptions(K3, "high") }
+    });
+    const client = new AcpAgentClient({ transport, strategy: kimiStrategy });
+    const states: Array<Record<string, string> | undefined> = [];
+    client.onRuntimeCapabilities((event) => states.push(event.runtimeState?.configValues));
+
+    await client.startThread({ model: K3 });
+
+    expect(states.at(-1)).toMatchObject({ model: K3, thinking: "high" });
+  });
+});
+
+it("labels a notification-driven refresh with the session's own source, not a load", async () => {
+  const transport = new KimiLikeTransport();
+  const client = new AcpAgentClient({ transport, strategy: kimiStrategy });
+  const sources: string[] = [];
+  client.onRuntimeCapabilities((event) => sources.push(event.runtimeCapabilities.source));
+  await client.startThread();
+
+  transport.emitSessionUpdate("session-1", {
+    sessionUpdate: "config_option_update",
+    configOptions: kimiConfigOptions(K3)
+  });
+
+  expect(sources.at(-1)).toBe("session-new");
+});

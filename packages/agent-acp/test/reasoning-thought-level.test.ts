@@ -42,6 +42,15 @@ describe("reasoningValueForThoughtLevel", () => {
     expect(reasoningValueForThoughtLevel("high", graded)).toBe("high");
   });
 
+  it("keeps a value that reads as on as on, even with a low-word in its label", () => {
+    const labelled = [
+      { value: "on", label: "On (minimal budget)" },
+      { value: "off", label: "Off" }
+    ];
+    expect(reasoningValueForThoughtLevel("high", labelled)).toBe("on");
+    expect(reasoningValueForThoughtLevel("low", labelled)).toBe("off");
+  });
+
   it("prefers off over a graded low level when both are offered", () => {
     const both = [
       { value: "off", label: "Off" },

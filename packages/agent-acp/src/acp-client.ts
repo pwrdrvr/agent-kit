@@ -47,11 +47,13 @@ import {
   acpRuntimeSupportsSseMcp,
   acpSessionRuntimeStateFromCapabilities,
   acpSessionRuntimeStateFromUpdate,
+  configOptionUpdateSet,
   mergeAcpRuntimeState,
   modeLabelFor,
   modelConfigOption,
   modelIdFromCapabilities,
   normalizeAcpRuntimeCapabilities,
+  runtimeStateFromConfigOptionSet,
   type AcpRuntimeCapabilities,
   type AcpRuntimeConfigOptionValue,
   type AcpSessionRuntimeState
@@ -205,6 +207,11 @@ export class AcpAgentClient implements AgentBackend {
   private unsubscribeRequest: (() => void) | undefined = undefined;
   private initialized = false;
   private runtimeCapabilities?: AcpRuntimeCapabilities;
+  /** What `initialize` reported: agent-level, and never any one session's. The
+   *  base a session's own menus are built on — the client-wide snapshot above is
+   *  whichever session wrote last, and a fresh session must not inherit its
+   *  menus or their current values. */
+  private initializeCapabilities?: AcpRuntimeCapabilities;
 
   constructor(options: AcpAgentClientOptions) {
     this.transport = options.transport;
@@ -566,7 +573,8 @@ export class AcpAgentClient implements AgentBackend {
 
     const runtimeCapabilities = this.captureRuntimeCapabilities(
       options.lifecycle === "load" ? "session-load" : "session-new",
-      result
+      result,
+      this.sessionBase(session)
     );
     if (runtimeCapabilities) {
       session.runtimeCapabilities = runtimeCapabilities;
@@ -789,7 +797,7 @@ export class AcpAgentClient implements AgentBackend {
    *  `session/set_model` answers `{}` and refreshes only via an async
    *  notification. On Kimi the model DETERMINES which thought levels exist —
    *  `K2.7 Coding` offers only `on`, `K3` offers `low`/`high`/`max` — and
-   *  `applyReasoning` picks from `runtimeCapabilities` on the following
+   *  `applyReasoning` picks from THIS session's menus on the following
    *  `startTurn`, so the refresh this write leaves behind is what it reads. */
   async setModel(threadId: string, modelId: string): Promise<void> {
     const capabilities = this.sessionCapabilities(threadId);
@@ -872,8 +880,13 @@ export class AcpAgentClient implements AgentBackend {
       },
       ACP_REQUEST_TIMEOUT_MS
     );
-    const runtimeCapabilities = this.captureRuntimeCapabilities("initialize", result);
+    const runtimeCapabilities = this.captureRuntimeCapabilities(
+      "initialize",
+      result,
+      this.initializeCapabilities
+    );
     if (runtimeCapabilities) {
+      this.initializeCapabilities = runtimeCapabilities;
       this.notifyRuntimeCapabilities({ runtimeCapabilities });
     }
     this.initialized = true;
@@ -906,11 +919,13 @@ export class AcpAgentClient implements AgentBackend {
     // ACP's `config_option_update` carries the FULL option set, and changing one
     // option can reshape another (Kimi's thought levels follow the model) — so
     // this session's menus are replaced from it, not just its current values.
-    if (hasFullConfigOptionSet(update)) {
+    if (configOptionUpdateSet(update) !== undefined) {
       const refreshed = this.captureRuntimeCapabilities(
-        "session-load",
+        // A live refresh of this session's menus, not a load: keep the source
+        // they were opened with.
+        session.runtimeCapabilities?.source ?? "session-new",
         update,
-        session.runtimeCapabilities
+        this.sessionBase(session)
       );
       if (refreshed) session.runtimeCapabilities = refreshed;
     }
@@ -919,7 +934,7 @@ export class AcpAgentClient implements AgentBackend {
     const runtimeState = acpSessionRuntimeStateFromUpdate(update, this.now());
     if (runtimeState) {
       session.runtimeState = mergeAcpRuntimeState(session.runtimeState, runtimeState);
-      const capabilities = session.runtimeCapabilities ?? this.runtimeCapabilities;
+      const capabilities = this.sessionCapabilities(session.threadId);
       if (capabilities) {
         this.notifyRuntimeCapabilities({
           threadId: session.threadId,
@@ -1041,7 +1056,7 @@ export class AcpAgentClient implements AgentBackend {
     const runtimeCapabilities = this.captureRuntimeCapabilities(
       "session-load",
       result,
-      session.runtimeCapabilities
+      this.sessionBase(session)
     );
     if (runtimeCapabilities) session.runtimeCapabilities = runtimeCapabilities;
     const requested: AcpSessionRuntimeState =
@@ -1060,7 +1075,16 @@ export class AcpAgentClient implements AgentBackend {
               }
             : { currentModelId: value, updatedAt: this.now() };
     session.runtimeState = mergeAcpRuntimeState(session.runtimeState, requested);
-    const effectiveCapabilities = session.runtimeCapabilities ?? this.runtimeCapabilities;
+    // A write can reshape OTHER options (Kimi moves thinking when the model
+    // changes), and a reply carrying the full set says how. The agent's report
+    // goes last: it is what the session is actually at.
+    const reply = asRecord(result);
+    const reported = runtimeStateFromConfigOptionSet(
+      reply?.configOptions ?? reply?.config_options,
+      this.now()
+    );
+    if (reported) session.runtimeState = mergeAcpRuntimeState(session.runtimeState, reported);
+    const effectiveCapabilities = this.sessionCapabilities(threadId);
     if (effectiveCapabilities) {
       this.notifyRuntimeCapabilities({
         threadId,
@@ -1155,12 +1179,13 @@ export class AcpAgentClient implements AgentBackend {
   }
 
   /** Normalize `result` into a capability snapshot, filling what it omits from
-   *  `base`. Pass the owning session's menus as `base` for a per-session reply —
-   *  the default (the client-wide snapshot) may be another session's. */
+   *  `base`. Required, not defaulted: an explicit `undefined` would trigger a
+   *  default parameter, and the only default on hand is the client-wide
+   *  snapshot — which may be another session's. */
   private captureRuntimeCapabilities(
     source: AcpRuntimeCapabilities["source"],
     result: unknown,
-    base: AcpRuntimeCapabilities | undefined = this.runtimeCapabilities
+    base: AcpRuntimeCapabilities | undefined
   ): AcpRuntimeCapabilities | undefined {
     const runtimeCapabilities = normalizeAcpRuntimeCapabilities({
       value: result,
@@ -1174,10 +1199,16 @@ export class AcpAgentClient implements AgentBackend {
     return runtimeCapabilities;
   }
 
-  /** The option menus to consult when choosing a value for `threadId`. Falls
-   *  back to the client-wide snapshot only for a session that has none yet. */
+  /** The option menus to consult when choosing a value for `threadId`. A
+   *  session with none of its own gets the agent-level `initialize` menus, never
+   *  another session's. */
   private sessionCapabilities(threadId: string): AcpRuntimeCapabilities | undefined {
-    return this.sessions.get(threadId)?.runtimeCapabilities ?? this.runtimeCapabilities;
+    return this.sessionBase(this.sessions.get(threadId));
+  }
+
+  /** What a session's menus are built on: its own, or `initialize`'s. */
+  private sessionBase(session: AcpSessionState | undefined): AcpRuntimeCapabilities | undefined {
+    return session?.runtimeCapabilities ?? this.initializeCapabilities;
   }
 
   private notifyRuntimeCapabilities(event: {
@@ -1281,16 +1312,6 @@ const HIGH_EFFORT_TOKENS = new Set([
   "think"
 ]);
 
-/** True for a `config_option_update` in the ACP 1.3 shape, which carries the
- *  whole `configOptions` set rather than a single changed option. */
-function hasFullConfigOptionSet(update: Record<string, unknown>): boolean {
-  const kind = readString(update, "sessionUpdate") ?? readString(update, "session_update");
-  return (
-    kind === "config_option_update" &&
-    Array.isArray(update.configOptions ?? update.config_options)
-  );
-}
-
 /** Classify a thinking/thought-level option VALUE from its value id + label
  *  (e.g. `{ value: "off", label: "Thinking Off" }` → "off"). "low" is a graded
  *  level that still thinks, just less: some agents offer no off at all — Kimi's
@@ -1300,8 +1321,10 @@ function thoughtLevelPolarity(
 ): "on" | "low" | "off" | "other" {
   const haystack = `${value.value} ${value.label ?? ""}`.toLowerCase();
   if (/\b(off|none|disabled?|no)\b/.test(haystack)) return "off";
-  if (/\b(low|minimal|min|minimum)\b/.test(haystack)) return "low";
   if (/\b(on|enabled?|high|full|yes)\b/.test(haystack)) return "on";
+  // After "on", so a value that already read as on (e.g. "On (minimal budget)")
+  // keeps doing so; only what used to be "other" can become "low".
+  if (/\b(low|minimal|min|minimum)\b/.test(haystack)) return "low";
   return "other";
 }
 
