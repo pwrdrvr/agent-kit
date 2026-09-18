@@ -8,7 +8,7 @@
 // Ported from PwrAgnt acp-runtime-capabilities.ts, retargeted off @pwragent/shared
 // onto neutral local types.
 
-import { asRecord, readBoolean, readString } from "./content";
+import { asRecord, readBoolean, readKind, readString } from "./content";
 
 export type AcpRuntimeConfigOptionValue = {
   value: string;
@@ -196,9 +196,11 @@ export function acpRuntimeSupportsSseMcp(
 export function modelConfigOption(
   capabilities: AcpRuntimeCapabilities | undefined
 ): AcpRuntimeConfigOption | undefined {
-  return capabilities?.configOptions?.find(
-    (option) => option.category === "model" || option.id === "model"
-  );
+  return capabilities?.configOptions?.find(isModelConfigOption);
+}
+
+function isModelConfigOption(option: AcpRuntimeConfigOption): boolean {
+  return option.category === "model" || option.id === "model";
 }
 
 /** The effective model id the agent will run with, agnostic of HOW it advertises
@@ -280,6 +282,9 @@ export function acpSessionRuntimeStateFromUpdate(
     return currentModeId ? { currentModeId, updatedAt: now } : undefined;
   }
   if (kind === "config_option_update") {
+    const fullSet = configOptionUpdateSet(update);
+    if (fullSet !== undefined) return runtimeStateFromConfigOptionSet(fullSet, now);
+    // Older agents sent the single option that changed.
     const configOption = asRecord(update.configOption ?? update.config_option) ?? update;
     const id =
       readString(configOption, "id") ??
@@ -304,6 +309,37 @@ export function mergeAcpRuntimeState(
       ...(update.configValues ?? {})
     }
   };
+}
+
+/** The option set a `config_option_update` carries in the ACP 1.3 shape — the
+ *  FULL `configOptions` list — or undefined for any other update, including the
+ *  older single-option form. The one place that recognizes this shape: menus and
+ *  runtime state must agree on which updates carry it. */
+export function configOptionUpdateSet(update: Record<string, unknown>): unknown[] | undefined {
+  if (readKind(update) !== "config_option_update") return undefined;
+  const set = update.configOptions ?? update.config_options;
+  return Array.isArray(set) ? set : undefined;
+}
+
+/** Every current value in a full option set, and the model among them: a model
+ *  the agent changed (or one `session/set_model` changed, which answers `{}` and
+ *  reports only via `config_option_update`) must not leave a stale
+ *  `currentModelId` winning in thread settings. Undefined for an empty set. */
+export function runtimeStateFromConfigOptionSet(
+  set: unknown,
+  now: number
+): AcpSessionRuntimeState | undefined {
+  const options = readConfigOptions(set);
+  const configValues = Object.fromEntries(
+    options.flatMap((option) =>
+      option.currentValue !== undefined ? [[option.id, option.currentValue]] : []
+    )
+  );
+  if (Object.keys(configValues).length === 0) return undefined;
+  const state: AcpSessionRuntimeState = { configValues, updatedAt: now };
+  const model = options.find(isModelConfigOption)?.currentValue;
+  if (model !== undefined) state.currentModelId = model;
+  return state;
 }
 
 /** Resolve the human-facing label for a mode id from the capabilities snapshot. */

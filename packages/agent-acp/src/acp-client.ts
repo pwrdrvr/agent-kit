@@ -47,11 +47,13 @@ import {
   acpRuntimeSupportsSseMcp,
   acpSessionRuntimeStateFromCapabilities,
   acpSessionRuntimeStateFromUpdate,
+  configOptionUpdateSet,
   mergeAcpRuntimeState,
   modeLabelFor,
   modelConfigOption,
   modelIdFromCapabilities,
   normalizeAcpRuntimeCapabilities,
+  runtimeStateFromConfigOptionSet,
   type AcpRuntimeCapabilities,
   type AcpRuntimeConfigOptionValue,
   type AcpSessionRuntimeState
@@ -146,6 +148,13 @@ type AcpSessionState = {
   normalizer: AcpSessionNormalizer;
   turnId: string | undefined;
   runtimeState: AcpSessionRuntimeState | undefined;
+  /** THIS session's option menus (models, modes, config options): what its
+   *  `session/new` / `session/load` returned, refreshed by its own option writes
+   *  and `config_option_update`s. One pooled client serves many sessions and
+   *  the menus differ between them — on Kimi the model decides which thought
+   *  levels exist — so anything choosing a value FOR a session reads this, never
+   *  the client-wide `runtimeCapabilities` whichever session wrote last. */
+  runtimeCapabilities: AcpRuntimeCapabilities | undefined;
   /** The in-flight `session/prompt` completion chain for the active turn.
    *  `startTurnNative` resolves at turn START and streams terminal events from
    *  this chain when the request settles; `undefined` between turns. Awaited by
@@ -198,6 +207,11 @@ export class AcpAgentClient implements AgentBackend {
   private unsubscribeRequest: (() => void) | undefined = undefined;
   private initialized = false;
   private runtimeCapabilities?: AcpRuntimeCapabilities;
+  /** What `initialize` reported: agent-level, and never any one session's. The
+   *  base a session's own menus are built on — the client-wide snapshot above is
+   *  whichever session wrote last, and a fresh session must not inherit its
+   *  menus or their current values. */
+  private initializeCapabilities?: AcpRuntimeCapabilities;
 
   constructor(options: AcpAgentClientOptions) {
     this.transport = options.transport;
@@ -482,6 +496,7 @@ export class AcpAgentClient implements AgentBackend {
         normalizer: new AcpSessionNormalizer({ quirks: this.strategy.quirks }),
         turnId: undefined,
         runtimeState: undefined,
+        runtimeCapabilities: undefined,
         pendingTurn: undefined,
         pendingInstructions: options.instructions,
         mcpServerNames: configuredMcpServers.map((server) => server.name)
@@ -544,6 +559,7 @@ export class AcpAgentClient implements AgentBackend {
       normalizer: new AcpSessionNormalizer({ quirks: this.strategy.quirks }),
       turnId: undefined,
       runtimeState: undefined,
+      runtimeCapabilities: undefined,
       pendingTurn: undefined,
       pendingInstructions: options.instructions,
       // Remember ONLY the MCP servers attached to THIS session so the host's
@@ -557,9 +573,11 @@ export class AcpAgentClient implements AgentBackend {
 
     const runtimeCapabilities = this.captureRuntimeCapabilities(
       options.lifecycle === "load" ? "session-load" : "session-new",
-      result
+      result,
+      this.sessionBase(session)
     );
     if (runtimeCapabilities) {
+      session.runtimeCapabilities = runtimeCapabilities;
       const runtimeState = acpSessionRuntimeStateFromCapabilities(
         runtimeCapabilities,
         this.now()
@@ -779,12 +797,13 @@ export class AcpAgentClient implements AgentBackend {
    *  `session/set_model` answers `{}` and refreshes only via an async
    *  notification. On Kimi the model DETERMINES which thought levels exist —
    *  `K2.7 Coding` offers only `on`, `K3` offers `low`/`high`/`max` — and
-   *  `applyReasoning` picks from `runtimeCapabilities` on the following
+   *  `applyReasoning` picks from THIS session's menus on the following
    *  `startTurn`, so the refresh this write leaves behind is what it reads. */
   async setModel(threadId: string, modelId: string): Promise<void> {
+    const capabilities = this.sessionCapabilities(threadId);
     const advertisesModelsCapability =
-      (this.runtimeCapabilities?.models?.availableModels?.length ?? 0) > 0;
-    const option = modelConfigOption(this.runtimeCapabilities);
+      (capabilities?.models?.availableModels?.length ?? 0) > 0;
+    const option = modelConfigOption(capabilities);
     if (!advertisesModelsCapability && option !== undefined) {
       await this.setRuntimeOption(threadId, "modelConfigOption", option.id, modelId);
       return;
@@ -861,8 +880,13 @@ export class AcpAgentClient implements AgentBackend {
       },
       ACP_REQUEST_TIMEOUT_MS
     );
-    const runtimeCapabilities = this.captureRuntimeCapabilities("initialize", result);
+    const runtimeCapabilities = this.captureRuntimeCapabilities(
+      "initialize",
+      result,
+      this.initializeCapabilities
+    );
     if (runtimeCapabilities) {
+      this.initializeCapabilities = runtimeCapabilities;
       this.notifyRuntimeCapabilities({ runtimeCapabilities });
     }
     this.initialized = true;
@@ -892,18 +916,33 @@ export class AcpAgentClient implements AgentBackend {
       return;
     }
 
+    // ACP's `config_option_update` carries the FULL option set, and changing one
+    // option can reshape another (Kimi's thought levels follow the model) — so
+    // this session's menus are replaced from it, not just its current values.
+    if (configOptionUpdateSet(update) !== undefined) {
+      const refreshed = this.captureRuntimeCapabilities(
+        // A live refresh of this session's menus, not a load: keep the source
+        // they were opened with.
+        session.runtimeCapabilities?.source ?? "session-new",
+        update,
+        this.sessionBase(session)
+      );
+      if (refreshed) session.runtimeCapabilities = refreshed;
+    }
+
     // Runtime-state changes (mode/model/config) ride session/update too.
     const runtimeState = acpSessionRuntimeStateFromUpdate(update, this.now());
     if (runtimeState) {
       session.runtimeState = mergeAcpRuntimeState(session.runtimeState, runtimeState);
-      if (this.runtimeCapabilities) {
+      const capabilities = this.sessionCapabilities(session.threadId);
+      if (capabilities) {
         this.notifyRuntimeCapabilities({
           threadId: session.threadId,
-          runtimeCapabilities: this.runtimeCapabilities,
+          runtimeCapabilities: capabilities,
           runtimeState: session.runtimeState
         });
       }
-      this.emitThreadSettings(session, this.runtimeCapabilities, session.runtimeState);
+      this.emitThreadSettings(session, capabilities, session.runtimeState);
       return;
     }
 
@@ -1014,7 +1053,12 @@ export class AcpAgentClient implements AgentBackend {
       optionId,
       value
     );
-    const runtimeCapabilities = this.captureRuntimeCapabilities("session-load", result);
+    const runtimeCapabilities = this.captureRuntimeCapabilities(
+      "session-load",
+      result,
+      this.sessionBase(session)
+    );
+    if (runtimeCapabilities) session.runtimeCapabilities = runtimeCapabilities;
     const requested: AcpSessionRuntimeState =
       source === "configOption"
         ? { configValues: { [optionId]: value }, updatedAt: this.now() }
@@ -1031,7 +1075,16 @@ export class AcpAgentClient implements AgentBackend {
               }
             : { currentModelId: value, updatedAt: this.now() };
     session.runtimeState = mergeAcpRuntimeState(session.runtimeState, requested);
-    const effectiveCapabilities = runtimeCapabilities ?? this.runtimeCapabilities;
+    // A write can reshape OTHER options (Kimi moves thinking when the model
+    // changes), and a reply carrying the full set says how. The agent's report
+    // goes last: it is what the session is actually at.
+    const reply = asRecord(result);
+    const reported = runtimeStateFromConfigOptionSet(
+      reply?.configOptions ?? reply?.config_options,
+      this.now()
+    );
+    if (reported) session.runtimeState = mergeAcpRuntimeState(session.runtimeState, reported);
+    const effectiveCapabilities = this.sessionCapabilities(threadId);
     if (effectiveCapabilities) {
       this.notifyRuntimeCapabilities({
         threadId,
@@ -1081,7 +1134,8 @@ export class AcpAgentClient implements AgentBackend {
    *  If nothing matches we leave it alone — the caller's `.catch` debug-logs. */
   private async applyReasoning(threadId: string, reasoning: string): Promise<void> {
     const target = reasoning.toLowerCase();
-    const modes = this.runtimeCapabilities?.modes?.availableModes ?? [];
+    const capabilities = this.sessionCapabilities(threadId);
+    const modes = capabilities?.modes?.availableModes ?? [];
     const modeMatch = modes.find(
       (mode) =>
         mode.id.toLowerCase() === target ||
@@ -1091,7 +1145,7 @@ export class AcpAgentClient implements AgentBackend {
       await this.setMode(threadId, modeMatch.id);
       return;
     }
-    const thinking = this.runtimeCapabilities?.configOptions?.find(
+    const thinking = capabilities?.configOptions?.find(
       (option) => option.category === "thought_level" || option.id === "thinking"
     );
     if (thinking !== undefined) {
@@ -1124,22 +1178,37 @@ export class AcpAgentClient implements AgentBackend {
     };
   }
 
+  /** Normalize `result` into a capability snapshot, filling what it omits from
+   *  `base`. Required, not defaulted: an explicit `undefined` would trigger a
+   *  default parameter, and the only default on hand is the client-wide
+   *  snapshot — which may be another session's. */
   private captureRuntimeCapabilities(
     source: AcpRuntimeCapabilities["source"],
-    result: unknown
+    result: unknown,
+    base: AcpRuntimeCapabilities | undefined
   ): AcpRuntimeCapabilities | undefined {
     const runtimeCapabilities = normalizeAcpRuntimeCapabilities({
       value: result,
       now: this.now(),
       source,
-      ...(this.runtimeCapabilities !== undefined
-        ? { initialize: this.runtimeCapabilities }
-        : {})
+      ...(base !== undefined ? { initialize: base } : {})
     });
     if (runtimeCapabilities) {
       this.runtimeCapabilities = runtimeCapabilities;
     }
     return runtimeCapabilities;
+  }
+
+  /** The option menus to consult when choosing a value for `threadId`. A
+   *  session with none of its own gets the agent-level `initialize` menus, never
+   *  another session's. */
+  private sessionCapabilities(threadId: string): AcpRuntimeCapabilities | undefined {
+    return this.sessionBase(this.sessions.get(threadId));
+  }
+
+  /** What a session's menus are built on: its own, or `initialize`'s. */
+  private sessionBase(session: AcpSessionState | undefined): AcpRuntimeCapabilities | undefined {
+    return session?.runtimeCapabilities ?? this.initializeCapabilities;
   }
 
   private notifyRuntimeCapabilities(event: {
@@ -1243,21 +1312,27 @@ const HIGH_EFFORT_TOKENS = new Set([
   "think"
 ]);
 
-/** Classify a thinking/thought-level option VALUE as on/off-like from its value
- *  id + label (e.g. `{ value: "off", label: "Thinking Off" }` → "off"). */
+/** Classify a thinking/thought-level option VALUE from its value id + label
+ *  (e.g. `{ value: "off", label: "Thinking Off" }` → "off"). "low" is a graded
+ *  level that still thinks, just less: some agents offer no off at all — Kimi's
+ *  K3 advertises exactly `low` / `high` / `max` / `on`. */
 function thoughtLevelPolarity(
   value: AcpRuntimeConfigOptionValue
-): "on" | "off" | "other" {
+): "on" | "low" | "off" | "other" {
   const haystack = `${value.value} ${value.label ?? ""}`.toLowerCase();
   if (/\b(off|none|disabled?|no)\b/.test(haystack)) return "off";
   if (/\b(on|enabled?|high|full|yes)\b/.test(haystack)) return "on";
+  // After "on", so a value that already read as on (e.g. "On (minimal budget)")
+  // keeps doing so; only what used to be "other" can become "low".
+  if (/\b(low|minimal|min|minimum)\b/.test(haystack)) return "low";
   return "other";
 }
 
 /** Pick the value to set on a "thinking" config option for a neutral reasoning
- *  token: low-effort → the OFF-like value, high-effort → the ON-like value.
- *  Returns undefined when the token isn't an effort signal we recognize, or the
- *  option has no value of the needed polarity (caller leaves the option alone).
+ *  token: high-effort → the ON-like value; low-effort → the OFF-like value, or,
+ *  when the agent offers only graded levels, the LOW one — the closest thing to
+ *  off it has. Returns undefined when the token isn't an effort signal we
+ *  recognize, or the option has no value to match (caller leaves it alone).
  *  Exported for testing. */
 export function reasoningValueForThoughtLevel(
   reasoning: string,
@@ -1267,8 +1342,12 @@ export function reasoningValueForThoughtLevel(
   const wantOff = LOW_EFFORT_TOKENS.has(token);
   const wantOn = HIGH_EFFORT_TOKENS.has(token);
   if (!wantOff && !wantOn) return undefined;
-  const desired = wantOff ? "off" : "on";
-  return values.find((value) => thoughtLevelPolarity(value) === desired)?.value;
+  const withPolarity = (polarity: ReturnType<typeof thoughtLevelPolarity>) =>
+    values.find((value) => thoughtLevelPolarity(value) === polarity);
+  if (wantOn) return withPolarity("on")?.value;
+  // Off beats low: where an agent can switch thinking off entirely, that is
+  // what a low-effort caller (one-shot enrichment) is asking for.
+  return (withPolarity("off") ?? withPolarity("low"))?.value;
 }
 
 function buildApprovalRequest(args: {
