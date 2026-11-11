@@ -9,6 +9,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./strategies": {
+      "types": "./dist/strategies.d.ts",
+      "import": "./dist/strategies.js"
+    },
+    "./discovery": {
+      "types": "./dist/discovery.d.ts",
+      "import": "./dist/discovery.js"
+    },
+    "./mcp-server-config": {
+      "types": "./dist/mcp-server-config.d.ts",
+      "import": "./dist/mcp-server-config.js"
     }
   },
   "main": "./dist/index.js",
@@ -18,7 +30,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --sourcemap",
+    "build": "tsup --entry.index src/index.ts --entry.strategies src/entries/strategies.ts --entry.discovery src/entries/discovery.ts --entry.mcp-server-config src/entries/mcp-server-config.ts --format esm --dts --clean --sourcemap",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
