@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { JsonRpcConnection, type JsonRpcTransport } from "../src/index";
+import { noopLogger } from "@pwrdrvr/agent-core";
 
 class FakeTransport implements JsonRpcTransport {
   sent: string[] = [];
@@ -125,12 +126,22 @@ describe("JsonRpcConnection", () => {
     });
   });
 
-  it("ignores malformed inbound JSON without throwing", async () => {
+  it("reports malformed inbound JSON without logging its content", async () => {
     const fake = new FakeTransport();
-    const conn = new JsonRpcConnection(fake, 1000);
+    const warn = vi.fn();
+    const conn = new JsonRpcConnection(fake, 1000, undefined, {
+      logger: { ...noopLogger, warn }, logContext: { owner: "fixture" }
+    });
     expect(() => fake.inboundRaw("{not json")).not.toThrow();
     await tick();
     expect(fake.sent).toHaveLength(0);
+    expect(warn).toHaveBeenCalledExactlyOnceWith("json-rpc invalid inbound message", {
+      owner: "fixture", length: 9
+    });
+    const next = conn.request("still-connected");
+    await tick();
+    fake.inbound({ id: fake.sentEnvelope(0).id, result: { ok: true } });
+    await expect(next).resolves.toEqual({ ok: true });
   });
 
   it("rejects pending requests when the transport closes", async () => {

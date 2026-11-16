@@ -4,10 +4,10 @@
 // the agent binary + its stdio subcommand). No discovery or product coupling.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import readline from "node:readline";
 import { type Logger, noopLogger } from "@pwrdrvr/agent-core";
 import { createCommandInvocation } from "./command-launch";
 import type { JsonRpcTransport } from "./json-rpc";
+import { readJsonRpcLines } from "./json-rpc-lines";
 import { prependCommandDirToPath } from "./shell-env";
 
 export type StdioJsonRpcTransportOptions = {
@@ -69,8 +69,7 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
 
     this.childProcess = child;
 
-    const stdoutReader = readline.createInterface({ input: child.stdout });
-    stdoutReader.on("line", (line: string) => {
+    readJsonRpcLines(child.stdout, (line) => {
       this.messageHandler(line);
     });
 
