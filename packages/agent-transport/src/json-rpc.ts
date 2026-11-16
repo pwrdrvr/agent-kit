@@ -174,6 +174,11 @@ export class JsonRpcConnection {
   private async handleMessage(rawMessage: string): Promise<void> {
     const envelope = parseJsonRpcEnvelope(rawMessage);
     if (!envelope) {
+      // Never log raw protocol content: it can contain private data.
+      this.logger.warn("json-rpc invalid inbound message", {
+        ...this.options.logContext,
+        length: rawMessage.length
+      });
       return;
     }
 

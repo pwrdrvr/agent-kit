@@ -19,6 +19,8 @@ export {
   type StdioJsonRpcTransportOptions
 } from "./stdio-transport";
 
+export { readJsonRpcLines } from "./json-rpc-lines";
+
 export {
   createCommandInvocation,
   type CommandInvocation

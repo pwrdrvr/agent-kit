@@ -5,6 +5,33 @@ import { describe, expect, it, vi } from "vitest";
 import { ClientSideConnection, type Client } from "@agentclientprotocol/sdk";
 import { AcpConnection, type AcpAgentConnection } from "../src/acp-connection";
 
+it("the SDK-backed ACP connection preserves Unicode strings over byte-split stdout", async () => {
+  const acp = new AcpConnection({
+    command: process.execPath,
+    args: ["-e", `
+      const { writeSync } = require('node:fs');
+      process.stdin.setEncoding('utf8');
+      let pending = '';
+      process.stdin.on('data', chunk => {
+        pending += chunk;
+        const lines = pending.split('\\n');
+        pending = lines.pop();
+        for (const line of lines) {
+          const request = JSON.parse(line);
+          const bytes = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: request.params }) + '\\r\\n');
+          for (const byte of bytes) writeSync(1, Buffer.from([byte]));
+        }
+      });
+    `]
+  });
+  try {
+    const params = { text: "\u2028\u2029é🛰️\r\n\u0000\ud800" };
+    expect(await acp.request("fixture/echo", params, 3000)).toEqual(params);
+  } finally {
+    await acp.close();
+  }
+});
+
 /** A stub agent connection capturing calls + returning canned results. */
 function stubConnection(overrides: Partial<AcpAgentConnection> = {}): AcpAgentConnection {
   return {

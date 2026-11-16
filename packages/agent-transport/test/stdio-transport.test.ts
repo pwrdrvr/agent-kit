@@ -6,20 +6,46 @@ import { JsonRpcConnection, StdioJsonRpcTransport } from "../src/index";
 
 // A minimal JSON-RPC echo server run as a real child process over stdio.
 const ECHO_SERVER = `
-const readline = require('node:readline');
-const rl = readline.createInterface({ input: process.stdin });
-rl.on('line', (line) => {
+process.stdin.setEncoding('utf8');
+let pending = '';
+process.stdin.on('data', (chunk) => {
+  pending += chunk;
+  const lines = pending.split('\\n');
+  pending = lines.pop();
+  for (const line of lines) handle(line);
+});
+function handle(line) {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
   if (msg.id != null && msg.method === 'echo') {
+    if (msg.params.floodStderr) process.stderr.write('diagnostic '.repeat(100000));
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { echoed: msg.params } }) + '\\n');
   } else if (msg.id != null && msg.method === 'boom') {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: 'kaboom' } }) + '\\n');
   }
-});
+}
 `;
 
 describe("StdioJsonRpcTransport (real subprocess)", () => {
+  it("returns a 1,295,500-byte Unicode response while draining stderr", async () => {
+    const transport = new StdioJsonRpcTransport({ command: process.execPath, args: ["-e", ECHO_SERVER] });
+    const params = { text: "\u2028\u2029é🛰️\r\n\ud800", floodStderr: true };
+    const overhead = Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: "rpc-1", result: { echoed: params } }));
+    params.text += "a".repeat(1_295_500 - overhead);
+    const inbound: number[] = [];
+    const conn = new JsonRpcConnection(transport, 3000, {
+      onMessage: ({ direction, raw }) => { if (direction === "inbound") inbound.push(Buffer.byteLength(raw)); }
+    });
+    await conn.connect();
+    try {
+      expect(await conn.request("echo", params)).toEqual({ echoed: params });
+      expect(inbound).toEqual([1_295_500]);
+      expect(await conn.request("echo", { stillConnected: true })).toEqual({ echoed: { stillConnected: true } });
+    } finally {
+      await conn.close();
+    }
+  });
+
   it("round-trips a request/response over real stdio", async () => {
     const transport = new StdioJsonRpcTransport({
       command: process.execPath,
