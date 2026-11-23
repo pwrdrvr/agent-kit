@@ -20,7 +20,10 @@ export type StdioJsonRpcTransportOptions = {
 };
 
 export class StdioJsonRpcTransport implements JsonRpcTransport {
-  private childProcess: ChildProcessWithoutNullStreams | null = null;
+  private active: {
+    child: ChildProcessWithoutNullStreams;
+    stopReading: () => void;
+  } | null = null;
   private messageHandler: (message: string) => void = () => undefined;
   private closeHandler: (error?: Error) => void = () => undefined;
   private readonly logger: Logger;
@@ -38,7 +41,7 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
   }
 
   async connect(): Promise<void> {
-    if (this.childProcess) {
+    if (this.active) {
       return;
     }
 
@@ -67,37 +70,61 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
       throw new Error("agent stdio pipes unavailable");
     }
 
-    this.childProcess = child;
+    // Keep error listeners for the lifetime of the child and its pipes. Node
+    // can emit a stream error even after a failed write callback or close().
+    const onError = (error: Error): void => this.disconnect(child, true, error);
+    child.on("error", onError);
+    child.stdin.on("error", onError);
+    child.stdout.on("error", onError);
+    child.stderr.on("error", onError);
+    child.once("close", () => this.disconnect(child, false));
 
-    readJsonRpcLines(child.stdout, (line) => {
-      this.messageHandler(line);
+    const stopReading = readJsonRpcLines(child.stdout, (line) => {
+      if (this.active?.child === child) this.messageHandler(line);
     });
+    this.active = { child, stopReading };
 
     // Drain stderr so the child never blocks on a full pipe.
     child.stderr.on("data", () => undefined);
-    child.on("error", (error: Error) => {
-      this.closeHandler(error);
-    });
-    child.on("close", () => {
-      this.childProcess = null;
-      this.closeHandler();
-    });
   }
 
   async close(): Promise<void> {
-    const child = this.childProcess;
-    this.childProcess = null;
-    if (!child) {
-      return;
-    }
-    child.kill();
+    const child = this.active?.child;
+    if (child) this.disconnect(child, true);
   }
 
   send(message: string): void {
-    const child = this.childProcess;
-    if (!child?.stdin) {
+    const child = this.active?.child;
+    if (!child) {
       throw new Error("agent stdio not connected");
     }
-    child.stdin.write(`${message}\n`);
+
+    try {
+      child.stdin.write(`${message}\n`, (error) => {
+        if (error) this.disconnect(child, true, error);
+      });
+    } catch (error) {
+      this.disconnect(child, true, error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+  }
+
+  private disconnect(
+    child: ChildProcessWithoutNullStreams,
+    terminate: boolean,
+    error?: Error
+  ): void {
+    const active = this.active;
+    if (active?.child !== child) return;
+
+    this.active = null;
+    active.stopReading();
+    try {
+      if (terminate && child.exitCode == null && child.signalCode == null && !child.killed) {
+        child.kill();
+      }
+    } finally {
+      this.closeHandler(error);
+    }
   }
 }

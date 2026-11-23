@@ -78,8 +78,7 @@ describe("StdioJsonRpcTransport (real subprocess)", () => {
   it("rejects in-flight requests when the child exits", async () => {
     const transport = new StdioJsonRpcTransport({
       command: process.execPath,
-      // a process that exits immediately — no response will come
-      args: ["-e", "process.exit(0)"]
+      args: ["-e", "process.stdin.once('data', () => process.exit(0))"]
     });
     const conn = new JsonRpcConnection(transport, 3000);
     await conn.connect();

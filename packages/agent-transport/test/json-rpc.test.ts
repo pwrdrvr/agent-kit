@@ -36,6 +36,16 @@ class FakeTransport implements JsonRpcTransport {
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("JsonRpcConnection", () => {
   it("resolves a request with the response matching its id", async () => {
     const fake = new FakeTransport();
@@ -151,6 +161,107 @@ describe("JsonRpcConnection", () => {
     await tick();
     fake.triggerClose(new Error("pipe died"));
     await expect(p).rejects.toThrow(/pipe died/);
+  });
+
+  it.each(["transport close", "explicit close", "timeout"])(
+    "settles a request on %s while the outbound observer is blocked",
+    async (cause) => {
+      vi.useFakeTimers();
+      const resume = deferred<void>();
+      try {
+        const fake = new FakeTransport();
+        const observing = deferred<void>();
+        const conn = new JsonRpcConnection(fake, 1_000, {
+          onMessage: ({ direction }) => {
+            if (direction !== "outbound") return;
+            observing.resolve();
+            return resume.promise;
+          }
+        });
+        await conn.connect();
+        const rejected = vi.fn();
+        void conn.request("blocked").catch(rejected);
+        await observing.promise;
+
+        const failure = new Error("pipe died");
+        if (cause === "transport close") fake.triggerClose(failure);
+        if (cause === "explicit close") await conn.close();
+        await vi.advanceTimersByTimeAsync(cause === "timeout" ? 1_000 : 0);
+        const expected = {
+          "transport close": failure.message,
+          "explicit close": "json-rpc transport closed",
+          timeout: "json-rpc timeout: blocked"
+        }[cause];
+        expect(rejected).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: expected }));
+        expect(vi.getTimerCount()).toBe(0);
+
+        await conn.connect();
+        resume.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(fake.sent).toEqual([]);
+      } finally {
+        resume.resolve();
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it.each([
+    { outcome: "result", when: "after disconnect", reconnectFirst: false },
+    { outcome: "error", when: "after reconnect", reconnectFirst: true }
+  ])("drops a child request's late $outcome $when", async ({ reconnectFirst }) => {
+    const fake = new FakeTransport();
+    const connect = vi.spyOn(fake, "connect");
+    const conn = new JsonRpcConnection(fake, 1_000);
+    const started = deferred<void>();
+    const reply = deferred<unknown>();
+    conn.setRequestHandler(() => {
+      started.resolve();
+      return reply.promise;
+    });
+    await conn.connect();
+    fake.inbound({ jsonrpc: "2.0", id: 42, method: "old/request" });
+    await started.promise;
+    fake.triggerClose(new Error("pipe died"));
+
+    if (reconnectFirst) {
+      await conn.connect();
+      reply.reject(new Error("old handler failed"));
+    } else {
+      reply.resolve({ old: true });
+    }
+    await tick();
+    expect(fake.sent).toEqual([]);
+    await conn.connect();
+    expect(connect).toHaveBeenCalledTimes(2);
+
+    conn.setRequestHandler(async () => ({ fresh: true }));
+    fake.inbound({ jsonrpc: "2.0", id: 42, method: "new/request" });
+    await tick();
+    expect(fake.sent.map((raw) => JSON.parse(raw))).toEqual([
+      { jsonrpc: "2.0", id: 42, result: { fresh: true } }
+    ]);
+  });
+
+  it("drops a child reply held by the outbound observer across an explicit close and reconnect", async () => {
+    const fake = new FakeTransport();
+    const started = deferred<void>();
+    const resume = deferred<void>();
+    const conn = new JsonRpcConnection(fake, 1_000, {
+      onMessage: ({ direction }) => {
+        if (direction !== "outbound") return;
+        started.resolve();
+        return resume.promise;
+      }
+    });
+    await conn.connect();
+    fake.inbound({ jsonrpc: "2.0", id: 42, method: "old/request" });
+    await started.promise;
+    await conn.close();
+    await conn.connect();
+    resume.resolve();
+    await tick();
+    expect(fake.sent).toEqual([]);
   });
 
   it("includes the error `data` payload in the rejection message", async () => {
