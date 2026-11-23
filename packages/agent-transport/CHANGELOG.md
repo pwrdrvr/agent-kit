@@ -1,5 +1,11 @@
 # @pwrdrvr/agent-transport
 
+## 0.1.9
+
+### Patch Changes
+
+- ede0229: Disconnect the owned child when a stdio pipe fails and escalate termination if it stays alive. Reject pending JSON-RPC requests promptly, including requests waiting on an outbound observer. Deliver already-read notifications after exit and discard late replies to child-originated requests after disconnect or reconnect.
+
 ## 0.1.8
 
 ### Patch Changes

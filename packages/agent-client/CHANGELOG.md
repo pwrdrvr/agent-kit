@@ -1,5 +1,13 @@
 # @pwrdrvr/agent-client
 
+## 0.8.3
+
+### Patch Changes
+
+- 3b650a2: Keep a replacement chat turn running when an interrupt request for the previous turn resolves after that turn has already ended.
+- Updated dependencies [ede0229]
+  - @pwrdrvr/agent-transport@0.1.9
+
 ## 0.8.2
 
 ### Patch Changes
