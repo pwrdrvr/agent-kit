@@ -81,6 +81,8 @@ export class JsonRpcConnection {
   private notificationHandler: JsonRpcNotificationHandler = () => undefined;
   private requestHandler: JsonRpcRequestHandler = async () => ({});
   private connected = false;
+  // A transport can already be live when passed to the connection.
+  private generation: symbol | null = Symbol();
   private readonly logger: Logger;
 
   constructor(
@@ -91,11 +93,15 @@ export class JsonRpcConnection {
   ) {
     this.logger = options.logger ?? noopLogger;
     this.transport.setMessageHandler((message) => {
-      void this.handleMessage(message);
+      void this.handleMessage(message).catch((error: unknown) => {
+        this.logger.error("json-rpc inbound handling failed", {
+          ...this.options.logContext,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
     });
     this.transport.setCloseHandler((error) => {
-      this.connected = false;
-      this.flushPending(error ?? new Error("json-rpc transport closed"));
+      this.disconnect(error ?? new Error("json-rpc transport closed"));
     });
   }
 
@@ -103,13 +109,13 @@ export class JsonRpcConnection {
     if (this.connected) {
       return;
     }
+    const generation = (this.generation ??= Symbol());
     await this.transport.connect();
-    this.connected = true;
+    if (this.generation === generation) this.connected = true;
   }
 
   async close(): Promise<void> {
-    this.flushPending(new Error("json-rpc transport closed"));
-    this.connected = false;
+    this.disconnect(new Error("json-rpc transport closed"));
     await this.transport.close();
   }
 
@@ -129,49 +135,42 @@ export class JsonRpcConnection {
     });
   }
 
-  async request(
+  request(
     method: string,
     params?: unknown,
     timeoutMs?: number,
     diagnostics?: JsonRpcObserverDiagnostics
   ): Promise<unknown> {
     const id = `rpc-${++this.requestCounter}`;
-    const requestPromise = new Promise<unknown>((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`json-rpc timeout: ${method}`));
       }, Math.max(100, timeoutMs ?? this.requestTimeoutMs));
       this.pending.set(id, { resolve, reject, timer });
-    });
 
-    try {
-      await this.sendEnvelope(
+      // The reply, timeout or disconnect can settle the request while an
+      // outbound observer is still running.
+      void this.sendEnvelope(
         {
           jsonrpc: "2.0",
           id,
           method,
           params: params ?? {}
         },
-        diagnostics
-      );
-    } catch (error) {
-      // The send failed (e.g. a broken stdin pipe), so no response will ever
-      // arrive — tear down the pending entry's timer + map slot now, otherwise
-      // the timer leaks (up to the request timeout, ~10 min for ACP) and
-      // `requestPromise` later rejects unhandled. Rethrow so the caller still
-      // sees the send error.
-      const pending = this.pending.get(id);
-      if (pending) {
-        clearTimeout(pending.timer);
+        { diagnostics, canSend: () => this.pending.has(id) }
+      ).catch((error: unknown) => {
+        clearTimeout(timer);
         this.pending.delete(id);
-      }
-      throw error;
-    }
-
-    return await requestPromise;
+        reject(error);
+      });
+    });
   }
 
   private async handleMessage(rawMessage: string): Promise<void> {
+    const generation = this.generation;
+    if (generation === null) return;
+
     const envelope = parseJsonRpcEnvelope(rawMessage);
     if (!envelope) {
       // Never log raw protocol content: it can contain private data.
@@ -187,6 +186,10 @@ export class JsonRpcConnection {
       raw: rawMessage,
       envelope
     });
+    const isCurrent = () => this.generation === generation;
+    // Already-read notifications can still be delivered after EOF. Messages
+    // with an ID belong to the connection that can settle or send their reply.
+    if (envelope.id != null && !isCurrent()) return;
 
     if (
       envelope.id != null &&
@@ -225,7 +228,7 @@ export class JsonRpcConnection {
         jsonrpc: "2.0",
         id: envelope.id,
         result: result ?? {}
-      });
+      }, { canSend: isCurrent });
     } catch (error) {
       await this.sendEnvelope({
         jsonrpc: "2.0",
@@ -234,14 +237,19 @@ export class JsonRpcConnection {
           code: -32603,
           message: error instanceof Error ? error.message : String(error)
         }
-      });
+      }, { canSend: isCurrent });
     }
   }
 
   private async sendEnvelope(
     envelope: JsonRpcEnvelope,
-    diagnostics?: JsonRpcObserverDiagnostics
+    { diagnostics, canSend }: {
+      diagnostics?: JsonRpcObserverDiagnostics | undefined;
+      canSend?: () => boolean;
+    } = {}
   ): Promise<void> {
+    if (canSend && !canSend()) return;
+
     const raw = JSON.stringify(envelope);
     await this.notifyObserver({
       direction: "outbound",
@@ -249,7 +257,7 @@ export class JsonRpcConnection {
       envelope,
       diagnostics
     });
-    this.transport.send(raw);
+    if (!canSend || canSend()) this.transport.send(raw);
   }
 
   private async notifyObserver(event: JsonRpcObserverEvent): Promise<void> {
@@ -269,7 +277,9 @@ export class JsonRpcConnection {
     }
   }
 
-  private flushPending(error: Error): void {
+  private disconnect(error: Error): void {
+    this.connected = false;
+    this.generation = null;
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
       pending.reject(error);
