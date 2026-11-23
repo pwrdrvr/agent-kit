@@ -10,6 +10,8 @@ import type { JsonRpcTransport } from "./json-rpc";
 import { readJsonRpcLines } from "./json-rpc-lines";
 import { prependCommandDirToPath } from "./shell-env";
 
+const CHILD_TERMINATION_GRACE_MS = 1_000;
+
 export type StdioJsonRpcTransportOptions = {
   /** Fully-resolved executable path or command name. */
   command: string;
@@ -24,6 +26,7 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
     child: ChildProcessWithoutNullStreams;
     stopReading: () => void;
   } | null = null;
+  private readonly retiring = new Map<ChildProcessWithoutNullStreams, NodeJS.Timeout>();
   private messageHandler: (message: string) => void = () => undefined;
   private closeHandler: (error?: Error) => void = () => undefined;
   private readonly logger: Logger;
@@ -77,7 +80,15 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
     child.stdin.on("error", onError);
     child.stdout.on("error", onError);
     child.stderr.on("error", onError);
-    child.once("close", () => this.disconnect(child, false));
+    const releaseChild = (): void => {
+      clearTimeout(this.retiring.get(child));
+      this.retiring.delete(child);
+    };
+    child.once("exit", releaseChild);
+    child.once("close", () => {
+      releaseChild();
+      this.disconnect(child, false);
+    });
 
     const stopReading = readJsonRpcLines(child.stdout, (line) => {
       if (this.active?.child === child) this.messageHandler(line);
@@ -120,11 +131,22 @@ export class StdioJsonRpcTransport implements JsonRpcTransport {
     this.active = null;
     active.stopReading();
     try {
-      if (terminate && child.exitCode == null && child.signalCode == null && !child.killed) {
-        child.kill();
-      }
+      if (terminate) this.terminate(child);
     } finally {
       this.closeHandler(error);
     }
+  }
+
+  private terminate(child: ChildProcessWithoutNullStreams): void {
+    if (child.exitCode != null || child.signalCode != null) return;
+
+    // A replacement can connect immediately. Keep ownership of this child
+    // until exit and escalate if the first signal does not stop it.
+    const escalation = setTimeout(() => {
+      if (child.exitCode == null && child.signalCode == null) child.kill("SIGKILL");
+    }, CHILD_TERMINATION_GRACE_MS);
+    escalation.unref();
+    this.retiring.set(child, escalation);
+    if (!child.killed) child.kill();
   }
 }

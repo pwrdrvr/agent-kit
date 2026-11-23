@@ -36,6 +36,7 @@ async function receive(wire: Buffer, sizes: number[]): Promise<string[]> {
     return lines;
   } finally {
     await transport.close();
+    child.emit("exit", null, "SIGTERM");
     expect(child.kill).toHaveBeenCalledTimes(1);
   }
 }

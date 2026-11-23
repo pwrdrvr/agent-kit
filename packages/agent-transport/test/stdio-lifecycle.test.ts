@@ -1,4 +1,4 @@
-import { type spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
 import fc from "fast-check";
@@ -20,10 +20,35 @@ while (!line.includes("\n")) {
 }
 const request = JSON.parse(line);
 if (request.method !== "initialize") process.exit(1);
+if (process.argv[1] === "ignore-sigterm") process.on("SIGTERM", () => {});
 fs.closeSync(0);
 process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { ready: true } }) + "\n");
 setInterval(() => {}, 1000);
 `;
+
+const FIXTURE_EXIT_TIMEOUT_MS = 2_500;
+
+async function spawnFixture(script: string, args: string[] = []): Promise<ChildProcessWithoutNullStreams> {
+  const { spawn: realSpawn } = await vi.importActual<{ spawn: typeof spawn }>("node:child_process");
+  const child = realSpawn(process.execPath, ["-e", script, ...args], {
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  spawnMock.mockReturnValue(child);
+  return child;
+}
+
+async function waitForExit(child: ChildProcessWithoutNullStreams): Promise<unknown[]> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return [child.exitCode, child.signalCode];
+  }
+  return await once(child, "exit", { signal: AbortSignal.timeout(FIXTURE_EXIT_TIMEOUT_MS) });
+}
+
+async function stopFixture(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGKILL");
+  await waitForExit(child);
+}
 
 function createChild() {
   return Object.assign(new EventEmitter(), {
@@ -43,14 +68,12 @@ const lifecycleStep = fc.oneof(
 );
 
 describe("StdioJsonRpcTransport lifecycle", () => {
-  it.runIf(process.platform !== "win32")("rejects session/new with EPIPE after initialize and reaps the child", async () => {
-    const { spawn: realSpawn } = await vi.importActual<{ spawn: typeof spawn }>("node:child_process");
-    const child = realSpawn(process.execPath, ["-e", BROKEN_STDIN_SERVER], {
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    const childExited = once(child, "exit");
+  it.runIf(process.platform !== "win32").each([
+    { args: [], exitSignal: "SIGTERM", signals: [[]] },
+    { args: ["ignore-sigterm"], exitSignal: "SIGKILL", signals: [[], ["SIGKILL"]] }
+  ])("rejects session/new with EPIPE and reaps the child with $exitSignal", async ({ args, exitSignal, signals }) => {
+    const child = await spawnFixture(BROKEN_STDIN_SERVER, args);
     const kill = vi.spyOn(child, "kill");
-    spawnMock.mockReturnValue(child);
     const transport = new StdioJsonRpcTransport({ command: "fixture" });
     const connection = new JsonRpcConnection(transport, 1_000);
     try {
@@ -64,14 +87,42 @@ describe("StdioJsonRpcTransport lifecycle", () => {
         status: "rejected",
         reason: expect.objectContaining({ code: "EPIPE" })
       })));
-      await expect(childExited).resolves.toEqual([null, "SIGTERM"]);
       expect(() => transport.send("{}")).toThrow("agent stdio not connected");
+      await expect(waitForExit(child)).resolves.toEqual([null, exitSignal]);
       await connection.close();
-      expect(kill).toHaveBeenCalledTimes(1);
+      expect(kill.mock.calls).toEqual(signals);
     } finally {
+      await stopFixture(child);
       await connection.close();
-      if (child.exitCode === null && child.signalCode === null && !child.killed) child.kill();
-      await childExited;
+    }
+  }, 10_000);
+
+  it("delivers an already-read notification when the observer resumes after clean exit", async () => {
+    const child = await spawnFixture(
+      'process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "turn/completed", params: { id: 42 } }))'
+    );
+    const closed = once(child, "close", { signal: AbortSignal.timeout(FIXTURE_EXIT_TIMEOUT_MS) });
+    let releaseObserver!: () => void;
+    const observing = new Promise<void>((resolve) => { releaseObserver = resolve; });
+    const onMessage = vi.fn(() => observing);
+    const onNotification = vi.fn();
+    const transport = new StdioJsonRpcTransport({ command: "fixture" });
+    const connection = new JsonRpcConnection(transport, 1_000, { onMessage });
+    connection.setNotificationHandler(onNotification);
+
+    try {
+      await connection.connect();
+      await expect(closed).resolves.toEqual([0, null]);
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      expect(onNotification).not.toHaveBeenCalled();
+      releaseObserver();
+      await vi.waitFor(() => {
+        expect(onNotification).toHaveBeenCalledExactlyOnceWith("turn/completed", { id: 42 });
+      });
+    } finally {
+      releaseObserver();
+      await stopFixture(child);
+      await connection.close();
     }
   });
 
@@ -89,8 +140,41 @@ describe("StdioJsonRpcTransport lifecycle", () => {
       expect(() => transport.send("{}")).toThrow("agent stdio not connected");
     } finally {
       await connection.close();
+      child.emit("exit", null, "SIGTERM");
     }
     expect(child.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it("escalates only the retired child that is still running after reconnect", async () => {
+    vi.useFakeTimers();
+    const exited = createChild();
+    const stuck = createChild();
+    const replacement = createChild();
+    spawnMock.mockReturnValueOnce(exited).mockReturnValueOnce(stuck).mockReturnValueOnce(replacement);
+    const transport = new StdioJsonRpcTransport({ command: "fixture" });
+    try {
+      await transport.connect();
+      exited.stdin.emit("error", new Error("broken pipe"));
+      await transport.connect();
+      stuck.stdin.emit("error", new Error("broken pipe"));
+      await transport.close();
+      await transport.connect();
+      expect(exited.kill.mock.calls).toEqual([[]]);
+      expect(stuck.kill.mock.calls).toEqual([[]]);
+
+      exited.exitCode = 0;
+      exited.emit("exit", 0, null);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.runOnlyPendingTimersAsync();
+      expect(exited.kill.mock.calls).toEqual([[]]);
+      expect(stuck.kill.mock.calls).toEqual([[], ["SIGKILL"]]);
+      expect(replacement.kill).not.toHaveBeenCalled();
+      transport.send("{}");
+    } finally {
+      await transport.close();
+      for (const child of [exited, stuck, replacement]) child.emit("exit", null, "SIGTERM");
+      vi.useRealTimers();
+    }
   });
 
   it("matches the lifecycle model across stream failures, closes and reconnects", async () => {
@@ -157,6 +241,7 @@ describe("StdioJsonRpcTransport lifecycle", () => {
               }
               if (step.action === "exit") {
                 child.process.exitCode = 0;
+                child.process.emit("exit", 0, null);
                 child.process.emit("close", 0, null);
               } else {
                 const emitter = step.action === "process" ? child.process : child.process[step.action];
@@ -175,6 +260,7 @@ describe("StdioJsonRpcTransport lifecycle", () => {
         }
       } finally {
         await transport.close();
+        for (const { process: child } of children) child.emit("exit", null, "SIGTERM");
       }
     }), {
       examples: [[[

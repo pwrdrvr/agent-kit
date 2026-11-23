@@ -187,7 +187,9 @@ export class JsonRpcConnection {
       envelope
     });
     const isCurrent = () => this.generation === generation;
-    if (!isCurrent()) return;
+    // Already-read notifications can still be delivered after EOF. Messages
+    // with an ID belong to the connection that can settle or send their reply.
+    if (envelope.id != null && !isCurrent()) return;
 
     if (
       envelope.id != null &&
