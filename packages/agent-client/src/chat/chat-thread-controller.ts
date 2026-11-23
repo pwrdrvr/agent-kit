@@ -559,7 +559,10 @@ export class ChatThreadController<TSettings = unknown> {
     const turn = this.turns.get(threadId);
     if (turn === undefined) return;
     await this.deps.client.interruptTurn(threadId).catch(() => undefined);
-    await this.finalizeAssistant(threadId, "interrupted");
+    // The backend can complete this turn before acknowledging the interrupt.
+    if (this.turns.get(threadId) === turn) {
+      await this.finalizeAssistant(threadId, "interrupted");
+    }
     this.deps.broadcast({ type: "turn_interrupted", threadId, turnId: turn.turnId });
   }
 

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import fc from "fast-check";
 import { z } from "zod";
 import type {
   AgentBackend,
@@ -43,7 +44,7 @@ class FakeBackend {
   startTurn = vi.fn(async (_opts: AgentStartTurnOptions) => ({
     turnId: `turn-${++this.turnCounter}`
   }));
-  interruptTurn = vi.fn(async (_threadId: string) => undefined);
+  interruptTurn = vi.fn(async (_threadId: string): Promise<void> => undefined);
   archiveThread = vi.fn(async (_threadId: string) => undefined);
   clearThreadGitInfo = vi.fn(async (_threadId: string) => undefined);
   close = vi.fn(async () => undefined);
@@ -789,5 +790,119 @@ describe("ChatThreadController", () => {
     expect(interrupted?.type === "turn_interrupted" && interrupted.turnId).toBe(turnId);
     const history = await controller.getHistory(tid);
     expect(history.find((m) => m.role === "assistant")?.text).toBe("partial");
+  });
+
+  it("matches the turn model when backend events and interrupt acknowledgments arrive late", async () => {
+    const step = fc.tuple(fc.constantFrom(
+      "start", "delta", "retry", "fail", "complete", "complete as failed", "interrupt", "acknowledge"
+    ), fc.nat(7));
+    await fc.assert(fc.asyncProperty(fc.array(step, { maxLength: 40 }), async (steps) => {
+      let clock = 0;
+      // Keep the clock outside the rate-limit window for each new turn.
+      const { controller, client, events } = makeController({ now: () => (clock += 61_000) });
+      const { threadId } = await controller.createThread({ name: "Model" });
+      const turnIds: string[] = [];
+      const committed: string[] = [];
+      const deltas: Array<{ turnId: string; delta: string }> = [];
+      const interrupted: string[] = [];
+      const interrupts = new Map<string, { acknowledge: () => void; done: Promise<void> }>();
+      let active: { id: string; chunks: string[]; error?: string } | undefined;
+
+      try {
+        for (const [index, [action, slot]] of steps.entries()) {
+          const turnId = turnIds[slot % turnIds.length];
+          const matching = active && active.id === turnId ? active : undefined;
+          const text = matching?.chunks.join("") ?? "";
+          const label = `${action}-${index}`;
+          switch (action) {
+            case "start": {
+              const starting = controller.sendMessage({ threadId, text: label });
+              if (active) {
+                await expect(starting).rejects.toThrow("a turn is already in progress");
+              } else {
+                const started = await starting;
+                turnIds.push(started.turnId);
+                active = { id: started.turnId, chunks: [] };
+              }
+              break;
+            }
+            case "delta":
+              if (!turnId) break;
+              client.emit({ kind: "agent_message_delta", threadId, turnId, itemId: "item", delta: label });
+              if (matching) {
+                matching.chunks.push(label);
+                deltas.push({ turnId, delta: label });
+              }
+              break;
+            case "retry":
+            case "fail":
+              if (!turnId) break;
+              client.emit({ kind: "error", threadId, turnId, message: label, willRetry: action === "retry" });
+              if (matching) {
+                matching.error = label;
+                if (action === "fail") {
+                  committed.push([text, label].filter(Boolean).join("\n\n"));
+                  active = undefined;
+                }
+              }
+              break;
+            case "complete":
+            case "complete as failed": {
+              if (!turnId) break;
+              const failed = action === "complete as failed";
+              client.emit({ kind: "turn_completed", threadId, turnId, status: failed ? "failed" : "completed" });
+              if (matching) {
+                const parts = [text];
+                if (failed && matching.error) parts.push(matching.error);
+                committed.push(parts.filter(Boolean).join("\n\n"));
+                active = undefined;
+              }
+              break;
+            }
+            case "interrupt": {
+              if (!active || interrupts.has(active.id)) break;
+              let acknowledge!: () => void;
+              const acknowledgment = new Promise<void>((resolve) => { acknowledge = resolve; });
+              client.interruptTurn.mockReturnValueOnce(acknowledgment);
+              interrupts.set(active.id, { acknowledge, done: controller.interrupt(threadId) });
+              break;
+            }
+            case "acknowledge": {
+              if (!turnId) break;
+              const interrupt = interrupts.get(turnId);
+              if (!interrupt) break;
+              interrupts.delete(turnId);
+              interrupt.acknowledge();
+              await interrupt.done;
+              interrupted.push(turnId);
+              if (matching) {
+                committed.push(text);
+                active = undefined;
+              }
+              break;
+            }
+          }
+
+          // Backend event handling is fire-and-forget. Let its journal and status writes finish.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const history = await controller.getHistory(threadId);
+          expect(history.filter(({ role }) => role === "assistant").map(({ text }) => text)).toEqual(committed);
+          expect(events.filter((event) => event.type === "stream_delta").map(({ turnId, delta }) => ({ turnId, delta })))
+            .toEqual(deltas);
+          expect(events.filter((event) => event.type === "turn_interrupted").map(({ turnId }) => turnId)).toEqual(interrupted);
+          const latestView = events.filter((event) => event.type === "thread_updated").at(-1);
+          expect(latestView?.thread.status).toEqual(active ? { kind: "streaming", turnId: active.id } : { kind: "idle" });
+        }
+      } finally {
+        for (const interrupt of interrupts.values()) interrupt.acknowledge();
+        await Promise.all([...interrupts.values()].map(({ done }) => done));
+      }
+    }), {
+      examples: [[[
+        ["start", 0], ["delta", 0], ["interrupt", 0], ["complete", 0],
+        ["start", 0], ["acknowledge", 0], ["delta", 0], ["fail", 0], ["complete", 0],
+        ["delta", 1], ["retry", 1], ["complete as failed", 1], ["complete", 1]
+      ]]]
+    });
   });
 });

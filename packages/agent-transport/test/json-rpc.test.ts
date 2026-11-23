@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import fc from "fast-check";
 import { JsonRpcConnection, type JsonRpcTransport } from "../src/index";
 import { noopLogger } from "@pwrdrvr/agent-core";
 
@@ -262,6 +263,152 @@ describe("JsonRpcConnection", () => {
     resume.resolve();
     await tick();
     expect(fake.sent).toEqual([]);
+  });
+
+  it("matches the request model across observer delays, replies, timeouts and reconnects", async () => {
+    const action = fc.constantFrom(
+      "request", "allow write", "response", "error response", "child request", "finish handler",
+      "advance clock", "disconnect", "close", "connect"
+    );
+    const step = fc.tuple(action, fc.nat(7));
+    const timeout = 100;
+    vi.useFakeTimers();
+    try {
+      await fc.assert(fc.asyncProperty(fc.array(step, { maxLength: 40 }), async (steps) => {
+        type Outcome = ["resolved" | "rejected", string];
+        type ClientRequest = {
+          method: string;
+          seen: { id: string | number; gate: ReturnType<typeof deferred<void>> };
+          onSettled: ReturnType<typeof vi.fn>;
+          deadline: number;
+          sent: boolean;
+          outcome?: Outcome;
+        };
+        const clientRequests: ClientRequest[] = [];
+        const childRequests: Array<{ id: number; generation: number; completed: boolean }> = [];
+        const observed = new Map<string, ClientRequest["seen"]>();
+        const handlers = new Map<number, ReturnType<typeof deferred<number>>>();
+        const expectedWrites: unknown[] = [];
+        const fake = new FakeTransport();
+        const conn = new JsonRpcConnection(fake, timeout, {
+          onMessage: ({ direction, envelope }) => {
+            if (direction !== "outbound" || !envelope.method || envelope.id == null) return;
+            const gate = deferred<void>();
+            observed.set(envelope.method, { id: envelope.id, gate });
+            return gate.promise;
+          }
+        });
+        conn.setRequestHandler((_method, _params, id) => {
+          const handler = deferred<number>();
+          handlers.set(Number(id), handler);
+          return handler.promise;
+        });
+        let connected = true;
+        let generation = 0;
+        let now = 0;
+        await conn.connect();
+        try {
+          for (const [index, [command, slot]] of steps.entries()) {
+            const request = clientRequests[slot % clientRequests.length];
+            const child = childRequests[slot % childRequests.length];
+            switch (command) {
+              case "request": {
+                if (!connected) break;
+                const method = `request-${index}`;
+                const onSettled = vi.fn();
+                void conn.request(method).then(
+                  (value) => onSettled("resolved", value), (error: Error) => onSettled("rejected", error.message)
+                );
+                const seen = observed.get(method)!;
+                expect(clientRequests.map((previous) => previous.seen.id)).not.toContain(seen.id);
+                clientRequests.push({ method, seen, onSettled, deadline: now + timeout, sent: false });
+                break;
+              }
+              case "allow write":
+                if (!request) break;
+                request.seen.gate.resolve();
+                if (!request.sent && request.outcome === undefined) {
+                  request.sent = true;
+                  expectedWrites.push({ jsonrpc: "2.0", id: request.seen.id, method: request.method, params: {} });
+                }
+                break;
+              case "response":
+                if (!connected || !request?.sent) break;
+                fake.inbound({ jsonrpc: "2.0", id: request.seen.id, result: `response-${index}` });
+                request.outcome ??= ["resolved", `response-${index}`];
+                break;
+              case "error response":
+                if (!connected || !request?.sent) break;
+                fake.inbound({ jsonrpc: "2.0", id: request.seen.id, error: { code: -32000, message: `error-${index}` } });
+                request.outcome ??= ["rejected", `json-rpc error (-32000): error-${index}`];
+                break;
+              case "child request":
+                if (!connected) break;
+                childRequests.push({ id: index, generation, completed: false });
+                fake.inbound({ jsonrpc: "2.0", id: index, method: "child/request" });
+                break;
+              case "finish handler":
+                if (!child || child.completed) break;
+                child.completed = true;
+                handlers.get(child.id)!.resolve(index);
+                if (connected && child.generation === generation) {
+                  expectedWrites.push({ jsonrpc: "2.0", id: child.id, result: index });
+                }
+                break;
+              case "advance clock": {
+                const elapsed = slot % 2 === 0 ? timeout / 2 : timeout;
+                now += elapsed;
+                await vi.advanceTimersByTimeAsync(elapsed);
+                for (const pending of clientRequests) {
+                  if (pending.deadline <= now) pending.outcome ??= ["rejected", `json-rpc timeout: ${pending.method}`];
+                }
+                break;
+              }
+              case "disconnect":
+              case "close": {
+                const reason = command === "disconnect" ? "pipe failed" : "json-rpc transport closed";
+                if (command === "disconnect") fake.triggerClose(new Error(reason));
+                else await conn.close();
+                connected = false;
+                for (const pending of clientRequests) pending.outcome ??= ["rejected", reason];
+                break;
+              }
+              case "connect":
+                await conn.connect();
+                if (!connected) generation++;
+                connected = true;
+                break;
+            }
+            await vi.advanceTimersByTimeAsync(0);
+            expect(fake.sent.map((raw) => JSON.parse(raw))).toEqual(expectedWrites);
+            for (const pending of clientRequests) {
+              expect(pending.onSettled.mock.calls).toEqual(pending.outcome === undefined ? [] : [pending.outcome]);
+            }
+            expect(vi.getTimerCount()).toBe(clientRequests.filter(({ outcome }) => outcome === undefined).length);
+          }
+        } finally {
+          await conn.close();
+          for (const { gate } of observed.values()) gate.resolve();
+          for (const handler of handlers.values()) handler.resolve(0);
+          await vi.advanceTimersByTimeAsync(0);
+        }
+      }), {
+        examples: [
+          [[
+            ["request", 0], ["request", 0], ["allow write", 1], ["response", 1],
+            ["child request", 0], ["disconnect", 0], ["connect", 0],
+            ["finish handler", 0], ["allow write", 0], ["response", 1],
+            ["child request", 0], ["finish handler", 1]
+          ]],
+          [[
+            ["request", 0], ["advance clock", 0], ["request", 0], ["allow write", 1],
+            ["advance clock", 0], ["allow write", 0], ["error response", 1], ["response", 1]
+          ]]
+        ]
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("includes the error `data` payload in the rejection message", async () => {
