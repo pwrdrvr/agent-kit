@@ -40,7 +40,8 @@
     "@pwrdrvr/agent-transport": "workspace:^"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "fast-check": "4.10.2"
   },
   "repository": {
     "type": "git",

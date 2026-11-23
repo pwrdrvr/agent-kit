@@ -61,10 +61,11 @@ function createChild() {
   });
 }
 
-const childEvents = fc.constantFrom("stdin", "stdout", "stderr", "process", "exit", "message");
+const childEvents = fc.constantFrom("stdin", "stdout", "stderr", "process", "exit", "stdio close", "message");
 const lifecycleStep = fc.oneof(
   fc.record({ action: fc.constantFrom("connect", "close", "send") }),
-  fc.record({ action: childEvents, target: fc.constantFrom("current", "retired") })
+  fc.record({ action: childEvents, target: fc.oneof(fc.constant("current" as const), fc.nat(7)) }),
+  fc.record({ action: fc.constant("advance" as const), ms: fc.constantFrom(1, 500, 999, 1_000) })
 );
 
 describe("StdioJsonRpcTransport lifecycle", () => {
@@ -177,19 +178,23 @@ describe("StdioJsonRpcTransport lifecycle", () => {
     }
   });
 
-  it("matches the lifecycle model across stream failures, closes and reconnects", async () => {
+  it("matches the lifecycle model while retired children are still owned", async () => {
     await fc.assert(fc.asyncProperty(fc.array(lifecycleStep, { maxLength: 50 }), async (steps) => {
+      const terminationGraceMs = 1_000;
       const children: Array<{
         process: ReturnType<typeof createChild>;
         writes: string[];
         expectedWrites: string[];
-        expectedKills: number;
+        expectedSignals: Array<[] | ["SIGKILL"]>;
+        escalationAt?: number;
+        exited: boolean;
+        stdioClosed: boolean;
       }> = [];
       spawnMock.mockImplementation(() => {
         const child = createChild();
         const writes: string[] = [];
         child.stdin.on("data", (data: Buffer) => writes.push(data.toString()));
-        children.push({ process: child, writes, expectedWrites: [], expectedKills: 0 });
+        children.push({ process: child, writes, expectedWrites: [], expectedSignals: [], exited: false, stdioClosed: false });
         return child;
       });
       const transport = new StdioJsonRpcTransport({ command: "fixture" });
@@ -198,10 +203,22 @@ describe("StdioJsonRpcTransport lifecycle", () => {
       transport.setCloseHandler(closes);
       transport.setMessageHandler(messages);
       let current: number | undefined;
-      let retired: number | undefined;
+      const retired: number[] = [];
+      let now = 0;
       let expectedChildren = 0;
       const expectedCloses: Array<Error | undefined> = [];
       const expectedMessages: string[] = [];
+      const detach = (reason?: Error) => {
+        retired.push(current!);
+        current = undefined;
+        expectedCloses.push(reason);
+      };
+      const expectTermination = (child: typeof children[number]) => {
+        if (child.exited) return;
+        child.expectedSignals.push([]);
+        child.escalationAt = now + terminationGraceMs;
+      };
+      vi.useFakeTimers();
       try {
         for (const [index, step] of steps.entries()) {
           const message = JSON.stringify({ index });
@@ -219,33 +236,45 @@ describe("StdioJsonRpcTransport lifecycle", () => {
           } else if (step.action === "close") {
             await transport.close();
             if (active) {
-              active.expectedKills++;
-              expectedCloses.push(undefined);
-              retired = current;
-              current = undefined;
+              expectTermination(active);
+              detach();
+            }
+          } else if (step.action === "advance") {
+            now += step.ms;
+            await vi.advanceTimersByTimeAsync(step.ms);
+            for (const child of children) {
+              if (child.escalationAt !== undefined && child.escalationAt <= now) {
+                child.expectedSignals.push(["SIGKILL"]);
+                delete child.escalationAt;
+              }
             }
           } else if ("target" in step) {
-            const target = step.target === "current" ? current : retired;
+            const target = step.target === "current" ? current : retired[step.target % retired.length];
             if (target === undefined) continue;
             const child = children[target]!;
+            if (child.stdioClosed) continue;
             if (step.action === "message") {
               if (target === current) expectedMessages.push(message);
               child.process.stdout.write(`${message}\n`);
-            } else {
-              const error = step.action === "exit" ? undefined : new Error(step.action);
-              if (target === current) {
-                if (error) child.expectedKills++;
-                expectedCloses.push(error);
-                retired = current;
-                current = undefined;
-              }
-              if (step.action === "exit") {
+            } else if (step.action === "exit" || step.action === "stdio close") {
+              if (!child.exited) {
+                child.exited = true;
+                delete child.escalationAt;
                 child.process.exitCode = 0;
                 child.process.emit("exit", 0, null);
+              }
+              if (step.action === "stdio close") {
+                child.stdioClosed = true;
                 child.process.emit("close", 0, null);
-              } else {
-                const emitter = step.action === "process" ? child.process : child.process[step.action];
-                emitter.emit("error", error);
+                if (target === current) detach();
+              }
+            } else {
+              const error = new Error(step.action);
+              const emitter = step.action === "process" ? child.process : child.process[step.action];
+              emitter.emit("error", error);
+              if (target === current) {
+                expectTermination(child);
+                detach(error);
               }
             }
           }
@@ -255,12 +284,14 @@ describe("StdioJsonRpcTransport lifecycle", () => {
           expect(messages.mock.calls.map(([line]) => line)).toEqual(expectedMessages);
           for (const child of children) {
             expect(child.writes).toEqual(child.expectedWrites);
-            expect(child.process.kill).toHaveBeenCalledTimes(child.expectedKills);
+            expect(child.process.kill.mock.calls).toEqual(child.expectedSignals);
           }
+          expect(vi.getTimerCount()).toBe(children.filter(({ escalationAt }) => escalationAt !== undefined).length);
         }
       } finally {
         await transport.close();
         for (const { process: child } of children) child.emit("exit", null, "SIGTERM");
+        vi.useRealTimers();
       }
     }), {
       examples: [[[
@@ -270,19 +301,24 @@ describe("StdioJsonRpcTransport lifecycle", () => {
         { action: "stdin", target: "current" },
         { action: "send" },
         { action: "connect" },
-        { action: "stdout", target: "retired" },
-        { action: "stderr", target: "retired" },
-        { action: "process", target: "retired" },
-        { action: "message", target: "retired" },
-        { action: "exit", target: "retired" },
-        { action: "message", target: "current" },
-        { action: "send" },
+        { action: "advance", ms: 500 },
         { action: "close" },
         { action: "close" },
         { action: "connect" },
-        { action: "exit", target: "retired" },
+        { action: "stdout", target: 0 },
+        { action: "stderr", target: 1 },
+        { action: "process", target: 0 },
+        { action: "message", target: 1 },
+        { action: "exit", target: 0 },
+        { action: "advance", ms: 999 },
+        { action: "advance", ms: 1 },
+        { action: "advance", ms: 1_000 },
+        { action: "stdio close", target: 1 },
+        { action: "stdio close", target: 0 },
         { action: "send" },
         { action: "exit", target: "current" },
+        { action: "message", target: "current" },
+        { action: "stdio close", target: "current" },
         { action: "connect" },
         { action: "stdout", target: "current" },
         { action: "connect" },

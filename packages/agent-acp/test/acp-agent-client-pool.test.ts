@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
 import { AcpAgentClientPool } from "../src/acp-agent-client-pool";
 
 /** Minimal stand-in for AcpAgentClient: records connect/close, with a
@@ -121,5 +122,116 @@ describe("AcpAgentClientPool", () => {
     // flush — the rejection is swallowed + logged, not surfaced, and evicted.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(pool.has("gemini")).toBe(false);
+  });
+
+  it("matches the per-key model across shared warm-ups, eviction and late completions", async () => {
+    const keys = ["gemini", "qwen"] as const;
+    const step = fc.tuple(
+      fc.constantFrom("acquire", "ready", "fail", "release", "timeout", "close all"),
+      fc.constantFrom(...keys),
+      fc.nat(7)
+    );
+    const warmTimeoutMs = 50;
+    vi.useFakeTimers();
+    try {
+      await fc.assert(fc.asyncProperty(fc.array(step, { maxLength: 40 }), async (steps) => {
+        type Attempt = {
+          key: typeof keys[number];
+          client: FakeClient;
+          callers: Array<ReturnType<typeof vi.fn>>;
+          state: "warming" | "ready" | "failed" | "timed out";
+          closed: boolean;
+        };
+        const pool = new AcpAgentClientPool({ warmTimeoutMs });
+        const current = new Map<Attempt["key"], Attempt>();
+        const attempts: Attempt[] = [];
+        const clients: FakeClient[] = [];
+        const factory = () => {
+          const client = new FakeClient(false);
+          clients.push(client);
+          return asClient(client);
+        };
+        try {
+          for (const [action, key, slot] of steps) {
+            const history = attempts.filter((attempt) => attempt.key === key);
+            const selected = history[slot % history.length];
+            const active = current.get(key);
+            switch (action) {
+              case "acquire": {
+                const settled = vi.fn();
+                void pool.acquire(key, factory).then(settled, (error: Error) => settled(error.message));
+                const attempt = active ?? {
+                  key, client: clients.at(-1)!,
+                  callers: [], state: "warming", closed: false
+                };
+                if (!active) {
+                  attempts.push(attempt);
+                  current.set(key, attempt);
+                }
+                attempt.callers.push(settled);
+                break;
+              }
+              case "ready":
+                if (selected?.state !== "warming") break;
+                selected.client.finishConnect();
+                selected.state = "ready";
+                break;
+              case "fail":
+                if (selected?.state !== "warming") break;
+                selected.client.failConnect();
+                selected.state = "failed";
+                selected.closed = true;
+                if (selected === active) current.delete(key);
+                break;
+              case "release":
+                await pool.release(key);
+                if (active) active.closed = true;
+                current.delete(key);
+                break;
+              case "timeout":
+                await vi.advanceTimersByTimeAsync(warmTimeoutMs);
+                for (const attempt of attempts) {
+                  if (attempt.state !== "warming") continue;
+                  attempt.state = "timed out";
+                  attempt.closed = true;
+                  if (current.get(attempt.key) === attempt) current.delete(attempt.key);
+                }
+                break;
+              case "close all":
+                await pool.closeAll();
+                for (const attempt of current.values()) attempt.closed = true;
+                current.clear();
+                break;
+            }
+            await vi.advanceTimersByTimeAsync(0);
+            expect(clients).toHaveLength(attempts.length);
+            for (const name of keys) expect(pool.has(name)).toBe(current.has(name));
+            for (const attempt of attempts) {
+              const outcomes = {
+                warming: [],
+                ready: [[attempt.client]],
+                failed: [["boom"]],
+                "timed out": [[expect.stringContaining("warm-up timed out")]]
+              };
+              expect(attempt.client.connectCount).toBe(1);
+              expect(attempt.client.closeCount > 0).toBe(attempt.closed);
+              for (const caller of attempt.callers) expect(caller.mock.calls).toEqual(outcomes[attempt.state]);
+            }
+          }
+        } finally {
+          await pool.closeAll();
+          await vi.advanceTimersByTimeAsync(warmTimeoutMs);
+        }
+      }), {
+        examples: [[[
+          ["acquire", "gemini", 0], ["acquire", "gemini", 0], ["acquire", "qwen", 0],
+          ["release", "gemini", 0], ["acquire", "gemini", 0], ["fail", "gemini", 0],
+          ["ready", "gemini", 1], ["acquire", "gemini", 0], ["timeout", "qwen", 0],
+          ["close all", "gemini", 0]
+        ]]]
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
