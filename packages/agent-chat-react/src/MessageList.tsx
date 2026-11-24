@@ -360,6 +360,9 @@ function ToolCard({ call, testIdPrefix }: ToolCardProps): ReactElement {
   const [open, setOpen] = useState<boolean>(false);
   const state = toolCardState(call.status);
 
+  const command = call.kind === "command"
+    ? call.command?.rawCommand ?? call.command?.displayCommand
+    : undefined;
   const hasArgs = call.args !== undefined;
   const hasResult = call.result !== undefined;
 
@@ -392,8 +395,16 @@ function ToolCard({ call, testIdPrefix }: ToolCardProps): ReactElement {
         </span>
       </button>
 
-      {open && (hasArgs || hasResult) && (
+      {open && (command || hasArgs || hasResult) && (
         <div className="ml__tool-body">
+          {command && (
+            <div className="ml__tool-section">
+              <span className="ml__tool-label">Command</span>
+              <pre className="ml__code" data-testid={`${testIdPrefix}-tool-command-${call.id}`}>
+                {command}
+              </pre>
+            </div>
+          )}
           {hasArgs && (
             <div className="ml__tool-section">
               <span className="ml__tool-label">Arguments</span>
