@@ -1,5 +1,14 @@
 # @pwrdrvr/agent-acp
 
+## 0.17.1
+
+### Patch Changes
+
+- 26510ba: Use Antigravity's `run_command` summary for the activity label. When a shell
+  command supplies only a generic title or repeats the command as its title,
+  show a one-line label of at most 72 characters and keep the full command in
+  the activity details.
+
 ## 0.17.0
 
 ### Minor Changes
