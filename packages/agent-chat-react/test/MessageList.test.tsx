@@ -114,6 +114,27 @@ describe("MessageList", () => {
     expect(result.textContent).toContain("\"hits\": 2");
   });
 
+  it("shows the exact command in the expanded card without arguments or a result", () => {
+    const script = "  echo first\necho second\\ ";
+    render(<MessageList entries={[{
+      type: "activity",
+      id: "command-activity",
+      summary: "Ran a command",
+      toolCalls: [{
+        id: "command",
+        name: "Bash",
+        kind: "command",
+        label: "echo first...",
+        status: "completed",
+        command: { displayCommand: "echo first", rawCommand: script }
+      }]
+    }]} />);
+
+    expect(screen.queryByTestId("message-list-tool-command-command")).toBeNull();
+    fireEvent.click(screen.getByTestId("message-list-tool-toggle-command"));
+    expect(screen.getByTestId("message-list-tool-command-command").textContent).toBe(script);
+  });
+
   it("streams assistant text incrementally via subscribeToStream", async () => {
     // A holder object defeats TS control-flow narrowing of the closed-over
     // callback (assigned inside the vi.fn mock TS can't track).

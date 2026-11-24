@@ -35,7 +35,7 @@ import {
   readString,
   readUpdateText
 } from "./content";
-import { toolCallFromUpdate } from "./tool-activity";
+import { readToolCallId, toolCallFromUpdate } from "./tool-activity";
 
 export type AcpNormalizerOptions = {
   /** The agent's normalization quirks (surface thoughts, where title comes from). */
@@ -234,8 +234,8 @@ export class AcpSessionNormalizer {
     kind: string,
     ctx: AcpApplyContext
   ): NormalizedThreadEvent[] {
-    const incoming = toolCallFromUpdate(update, kind, ctx.threadId);
-    const prev = this.toolCalls.get(incoming.id);
+    const prev = this.toolCalls.get(readToolCallId(update, kind, ctx.threadId));
+    const incoming = toolCallFromUpdate(update, kind, ctx.threadId, prev);
     if (prev === undefined) {
       this.toolCalls.set(incoming.id, incoming);
       return [
@@ -248,7 +248,7 @@ export class AcpSessionNormalizer {
     // agent-core merges command detail shallowly (later displayCommand wins);
     // reconcile it with the same prefer-specific rule the label uses, so a
     // later output-only update keeps the earlier specific displayCommand.
-    if (merged.command && prev.command) {
+    if (merged.command && prev.command && incoming.command?.rawCommand === undefined) {
       merged.command = {
         ...merged.command,
         displayCommand: preferSpecificLabel(

@@ -12,14 +12,63 @@ import {
   type NormalizedToolStatus
 } from "@pwrdrvr/agent-core";
 import {
+  formatCommandLabel,
+  isCommandLabelFallback,
+  isGenericShellToolTitle
+} from "./command-label";
+import {
   asRecord,
   readContentText,
   readFirstLocationPath,
   readFirstString,
+  readNonEmptyString,
   readNumber,
   readString,
   readToolOutput
 } from "./content";
+
+function readDirectCommand(record: Record<string, unknown> | undefined): string | undefined {
+  for (const key of [
+    "command",
+    "cmd",
+    "displayCommand",
+    "shellCommand",
+    "commandText",
+    "CommandLine"
+  ]) {
+    const command = readString(record, key);
+    if (command?.trim()) return command;
+  }
+  return undefined;
+}
+
+function readCommandDescription(
+  update: Record<string, unknown>,
+  rawInput: Record<string, unknown> | undefined
+): string | undefined {
+  const metadata = asRecord(asRecord(update._meta)?.["x.ai/tool"]);
+  return (
+    readNonEmptyString(rawInput, "description") ??
+    readNonEmptyString(rawInput, "toolSummary") ??
+    readNonEmptyString(asRecord(update.rawOutput), "description") ??
+    readNonEmptyString(asRecord(metadata?.input), "description") ??
+    readNonEmptyString(update, "description")
+  );
+}
+
+function labelForCommand(
+  label: string,
+  command: string,
+  previous: NormalizedToolCall | undefined
+): string {
+  if (!isCommandLabelFallback(label, command)) return label;
+  // Completion updates may echo the script without repeating its description.
+  if (previous?.command?.rawCommand === command &&
+    !isCommandLabelFallback(previous.label, command)) {
+    return previous.label;
+  }
+  return formatCommandLabel(command);
+}
 
 /** Read the tool-call correlation id across every spelling agents use. */
 export function readToolCallId(
@@ -56,13 +105,11 @@ function normalizeStatus(status: string | undefined): NormalizedToolStatus | und
 
 /**
  * Choose the tool kind. ACP carries an explicit `kind` on tool calls
- * (read/edit/write/execute/search/…); when present it maps directly, otherwise
- * we fall back to agent-core's name-based `inferToolKind` over the label, and to
- * a command/read heuristic.
+ * (read/edit/write/search/…). Shell calls are identified separately so command
+ * arguments can be interpreted using the tool's kind.
  */
 function toolKindFor(
   acpKind: string | undefined,
-  command: string | undefined,
   path: string | undefined,
   label: string
 ): NormalizedToolKind {
@@ -70,10 +117,6 @@ function toolKindFor(
     case "edit":
     case "write":
       return "write";
-    case "execute":
-    case "exec":
-    case "shell":
-      return "command";
     case "read":
       return "read";
     case "search":
@@ -83,7 +126,6 @@ function toolKindFor(
     default:
       break;
   }
-  if (command) return "command";
   const inferred = inferToolKind(label);
   if (inferred !== "other") return inferred;
   // A tool with a file path but no other signal is a read; otherwise unknown.
@@ -98,25 +140,40 @@ function toolKindFor(
 export function toolCallFromUpdate(
   update: Record<string, unknown>,
   kind: string,
-  sessionId: string
+  sessionId: string,
+  previous?: NormalizedToolCall
 ): NormalizedToolCall {
   const id = readToolCallId(update, kind, sessionId);
-  const label =
-    readString(update, "title") ??
-    readString(update, "name") ??
-    readString(update, "kind") ??
-    kind.replaceAll("_", " ");
+  const title = readString(update, "title");
+  const name = readString(update, "name");
   const acpKind = readString(update, "kind");
+  const titleCandidate = title ?? name ?? acpKind ?? kind.replaceAll("_", " ");
   const path = readString(update, "path") ?? readFirstLocationPath(update);
-  const command = readString(update, "command");
+  const rawInput = asRecord(update.rawInput ?? update.raw_input);
+  const directCommand = readDirectCommand(update);
+  // An explicit non-shell kind takes precedence over command-shaped input.
+  const nonShellKind = /^(?:read|edit|write|delete|move|search|think|fetch|switch_mode)$/i.test(acpKind ?? "");
+  const shellTool = !nonShellKind && (
+    /^(?:execute|exec|command|command_?execution|shell|bash|sh|zsh|terminal)$/i.test(acpKind ?? "") ||
+    kind === "terminal" ||
+    directCommand !== undefined ||
+    previous?.kind === "command" ||
+    inferToolKind(name ?? titleCandidate) === "command" ||
+    isGenericShellToolTitle(titleCandidate)
+  );
+  const command = shellTool ? directCommand ?? readDirectCommand(rawInput) : undefined;
+  const labelCommand = command ?? (shellTool ? previous?.command?.rawCommand : undefined);
+  const label = labelCommand === undefined
+    ? titleCandidate
+    : labelForCommand(readCommandDescription(update, rawInput) ?? titleCandidate, labelCommand, previous);
   const output = readToolOutput(update);
   const exitCode = readNumber(update, "exitCode") ?? readNumber(update, "exit_code");
   const status = normalizeStatus(readString(update, "status"));
-  const toolKind = toolKindFor(acpKind, command, path, label);
+  const toolKind = shellTool ? "command" : toolKindFor(acpKind, path, titleCandidate);
 
   const call: NormalizedToolCall = {
     id,
-    name: readString(update, "name") ?? acpKind ?? label,
+    name: name ?? acpKind ?? titleCandidate,
     kind: toolKind,
     label,
     status: status ?? "in_progress",
@@ -137,10 +194,9 @@ export function toolCallFromUpdate(
   // Build a command detail ONLY for genuine command tools — i.e. when the update
   // carries a command string or an exit code. A `read` returning file content
   // has `output` but no command/exitCode, so its output stays on `result` (not
-  // folded into a fake command) and its path rides `locations`. An explicit
-  // display target is used only when the update names one, so a later output-
-  // only update never clobbers an earlier specific displayCommand on merge.
-  const explicitDisplay = command ?? readString(update, "title");
+  // folded into a fake command) and its path rides `locations`. A completion
+  // can reuse a known command for display while reporting its output or exit code.
+  const explicitDisplay = labelCommand ?? title;
   if (command !== undefined || exitCode !== undefined) {
     const detail: NormalizedCommandDetail = {
       displayCommand: explicitDisplay ?? label

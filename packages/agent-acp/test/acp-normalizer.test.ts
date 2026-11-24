@@ -163,6 +163,95 @@ describe("AcpSessionNormalizer — tool calls", () => {
     });
   });
 
+  it.each(["rawInput", "raw_input"])("keeps the Antigravity summary from %s through completion", (inputKey) => {
+    const script = "printf '%s\\n' 'checking fixture'\nprintf '%s\\n' 'done'";
+    const events = applyAll(gemini(), [
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "run-command",
+        kind: "execute",
+        name: "run_command",
+        title: script,
+        [inputKey]: { CommandLine: script, toolSummary: "Check the fixture" }
+      },
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "run-command",
+        title: script,
+        status: "completed",
+        output: "done\n",
+        exitCode: 0
+      }
+    ]);
+
+    expect(events[0]).toMatchObject({
+      toolCall: {
+        label: "Check the fixture",
+        kind: "command",
+        command: { displayCommand: script, rawCommand: script }
+      }
+    });
+    expect(events[1]).toMatchObject({
+      kind: "tool_call_update",
+      toolCall: {
+        label: "Check the fixture",
+        kind: "command",
+        status: "completed",
+        command: { displayCommand: script, rawCommand: script, output: "done\n", exitCode: 0 }
+      }
+    });
+  });
+
+  it.each(["/bin/zsh -lc", "/bin/sh -c"])("compares the script title with a %s wrapper", (wrapper) => {
+    const script = 'echo "done"';
+    const command = `${wrapper} '${script}'`;
+    const events = applyAll(gemini(), [
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "run-command",
+        kind: "execute",
+        title: 'echo   "done"',
+        command
+      }
+    ]);
+
+    expect(events[0]).toMatchObject({
+      toolCall: {
+        label: script,
+        command: { displayCommand: command, rawCommand: command }
+      }
+    });
+  });
+
+  it("keeps leading whitespace and a trailing escaped space in command details", () => {
+    const command = "  printf '%s' fixture\\ ";
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+    expect(event).toMatchObject({
+      toolCall: { command: { displayCommand: command, rawCommand: command } }
+    });
+  });
+
+  it.each(["run", "execute"])("shortens the command when the title is %s", (title) => {
+    const command = `echo ${"a".repeat(80)}\necho done`;
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title, command }
+    ]);
+    expect(event).toMatchObject({
+      toolCall: { label: `echo ${"a".repeat(64)}...` }
+    });
+  });
+
+  it.each(["read", "search"])("keeps a command-shaped argument as input for a %s tool", (kind) => {
+    const args = { command: "printf", description: "Look up command documentation" };
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "docs", kind, title: "Shell manual", rawInput: args }
+    ]);
+    expect(event).toMatchObject({ toolCall: { kind, label: "Shell manual", args } });
+    expect(event).not.toHaveProperty("toolCall.command");
+  });
+
   it("reconciles a generic later label against a specific earlier one", () => {
     const events = applyAll(gemini(), [
       { sessionUpdate: "tool_call", toolCallId: "t1", kind: "execute", title: "pnpm build", status: "in_progress" },
