@@ -163,6 +163,49 @@ describe("AcpSessionNormalizer — tool calls", () => {
     });
   });
 
+  it("uses the Antigravity command summary and preserves the script in details", () => {
+    const script = "printf '%s\\n' 'checking fixture'\nprintf '%s\\n' 'done'";
+    const events = applyAll(gemini(), [
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "run-command",
+        kind: "execute",
+        name: "run_command",
+        title: script,
+        rawInput: { CommandLine: script, toolSummary: "Check the fixture" }
+      }
+    ]);
+
+    expect(events[0]).toMatchObject({
+      toolCall: {
+        label: "Check the fixture",
+        kind: "command",
+        command: { displayCommand: script, rawCommand: script }
+      }
+    });
+  });
+
+  it("compares a script title with its wrapped command and keeps the script's quotes", () => {
+    const script = 'echo "done"';
+    const command = `/bin/zsh -lc '${script}'`;
+    const events = applyAll(gemini(), [
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "run-command",
+        kind: "execute",
+        title: 'echo   "done"',
+        command
+      }
+    ]);
+
+    expect(events[0]).toMatchObject({
+      toolCall: {
+        label: script,
+        command: { displayCommand: command, rawCommand: command }
+      }
+    });
+  });
+
   it("reconciles a generic later label against a specific earlier one", () => {
     const events = applyAll(gemini(), [
       { sessionUpdate: "tool_call", toolCallId: "t1", kind: "execute", title: "pnpm build", status: "in_progress" },

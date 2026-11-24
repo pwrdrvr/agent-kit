@@ -12,14 +12,49 @@ import {
   type NormalizedToolStatus
 } from "@pwrdrvr/agent-core";
 import {
+  formatCommandLabel,
+  isGenericShellToolTitle,
+  normalizeCommandText
+} from "./command-label";
+import {
   asRecord,
   readContentText,
   readFirstLocationPath,
   readFirstString,
+  readNonEmptyString,
   readNumber,
   readString,
   readToolOutput
 } from "./content";
+
+function readDirectCommand(record: Record<string, unknown> | undefined): string | undefined {
+  for (const key of [
+    "command",
+    "cmd",
+    "displayCommand",
+    "shellCommand",
+    "commandText",
+    "CommandLine"
+  ]) {
+    const command = readNonEmptyString(record, key);
+    if (command !== undefined) return command;
+  }
+  return undefined;
+}
+
+function readCommandDescription(
+  update: Record<string, unknown>,
+  rawInput: Record<string, unknown> | undefined
+): string | undefined {
+  const metadata = asRecord(asRecord(update._meta)?.["x.ai/tool"]);
+  return (
+    readNonEmptyString(rawInput, "description") ??
+    readNonEmptyString(rawInput, "toolSummary") ??
+    readNonEmptyString(asRecord(update.rawOutput), "description") ??
+    readNonEmptyString(asRecord(metadata?.input), "description") ??
+    readNonEmptyString(update, "description")
+  );
+}
 
 /** Read the tool-call correlation id across every spelling agents use. */
 export function readToolCallId(
@@ -101,14 +136,21 @@ export function toolCallFromUpdate(
   sessionId: string
 ): NormalizedToolCall {
   const id = readToolCallId(update, kind, sessionId);
-  const label =
-    readString(update, "title") ??
-    readString(update, "name") ??
-    readString(update, "kind") ??
-    kind.replaceAll("_", " ");
+  const title = readString(update, "title");
+  const name = readString(update, "name");
   const acpKind = readString(update, "kind");
+  const titleCandidate = title ?? name ?? acpKind ?? kind.replaceAll("_", " ");
   const path = readString(update, "path") ?? readFirstLocationPath(update);
-  const command = readString(update, "command");
+  const rawInput = asRecord(update.rawInput);
+  const command = readDirectCommand(update) ?? readDirectCommand(rawInput);
+  const description = command ? readCommandDescription(update, rawInput) : undefined;
+  const labelCandidate = description ?? titleCandidate;
+  const label = command && (
+    isGenericShellToolTitle(labelCandidate) ||
+    normalizeCommandText(labelCandidate) === normalizeCommandText(command)
+  )
+    ? formatCommandLabel(command)
+    : labelCandidate;
   const output = readToolOutput(update);
   const exitCode = readNumber(update, "exitCode") ?? readNumber(update, "exit_code");
   const status = normalizeStatus(readString(update, "status"));
@@ -116,7 +158,7 @@ export function toolCallFromUpdate(
 
   const call: NormalizedToolCall = {
     id,
-    name: readString(update, "name") ?? acpKind ?? label,
+    name: name ?? acpKind ?? titleCandidate,
     kind: toolKind,
     label,
     status: status ?? "in_progress",
@@ -140,7 +182,7 @@ export function toolCallFromUpdate(
   // folded into a fake command) and its path rides `locations`. An explicit
   // display target is used only when the update names one, so a later output-
   // only update never clobbers an earlier specific displayCommand on merge.
-  const explicitDisplay = command ?? readString(update, "title");
+  const explicitDisplay = command ?? title;
   if (command !== undefined || exitCode !== undefined) {
     const detail: NormalizedCommandDetail = {
       displayCommand: explicitDisplay ?? label
