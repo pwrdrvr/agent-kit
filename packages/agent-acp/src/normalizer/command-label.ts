@@ -15,24 +15,32 @@ export function isCommandLabelFallback(label: string, command: string): boolean 
 }
 
 /** Unwrap POSIX and Windows interpreter invocations for display. */
-function stripShellWrapper(command: string): string {
-  return command
-    .replace(/^(?:\/\S+\/)?(?:ba|z)?sh\s+-l?c\s+/i, "")
+function unwrapCommandText(command: string): string {
+  const trimmed = command.trim();
+  const posixWrapper = /^(?:\/\S+\/)?(?:ba|z)?sh\s+-l?c\s+/.exec(trimmed);
+  if (posixWrapper) {
+    const script = trimmed.slice(posixWrapper[0].length);
+    // A quoted script can be followed by positional arguments. Keep the
+    // invocation when those arguments are present or the script is blank.
+    const quotedScript = /^(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*")/.exec(script)?.[0];
+    if (quotedScript === undefined) return script;
+    const body = quotedScript.slice(1, -1);
+    return quotedScript.length === script.length && body.trim() ? body : trimmed;
+  }
+
+  const unwrapped = trimmed
     .replace(
       /^(?:"[^"]*(?:powershell|pwsh|cmd|bash)\.exe"|[^\s"]*(?:powershell|pwsh|cmd|bash)\.exe)\s+(?:-Command|-lc|-c|\/d\s+\/s\s+\/c|\/c)\s+/i,
       ""
     )
     .trim();
+  return unwrapped === trimmed
+    ? unwrapped
+    : unwrapped.replace(/^(['"])([\s\S]*)\1$/, "$2");
 }
 
 function normalizeCommandText(command: string): string {
-  const trimmed = command.trim();
-  const unwrapped = stripShellWrapper(trimmed);
-  // Strip the wrapper's matched quotes and keep quotes in bare commands.
-  const script = unwrapped === trimmed
-    ? unwrapped
-    : unwrapped.replace(/^(['"])([\s\S]*)\1$/, "$2");
-  return script.replace(/\s+/g, " ").trim();
+  return unwrapCommandText(command).replace(/\s+/g, " ").trim();
 }
 
 export function formatCommandLabel(command: string): string {

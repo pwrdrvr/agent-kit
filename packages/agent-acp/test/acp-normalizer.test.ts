@@ -223,6 +223,36 @@ describe("AcpSessionNormalizer — tool calls", () => {
     });
   });
 
+  it.each([
+    { command: "bash -c 'echo \"$1\"' _ 'hello'" },
+    { command: 'bash -c "echo $1" _ "hello"' },
+    { command: "/bin/bash -C ./build.sh" },
+    { command: '/bin/bash -c ""' },
+    { command: "/bin/bash -c ' \t '", label: "/bin/bash -c ' '" }
+  ])("keeps the invocation in the label for $command", ({ command, label = command }) => {
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: { label, command: { displayCommand: command, rawCommand: command } }
+    });
+  });
+
+  it("shows one line for a double-quoted script with escaped quotes", () => {
+    const command = '/bin/bash -c "echo \\"first\\"\necho second"';
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: {
+        label: 'echo \\"first\\" echo second',
+        command: { displayCommand: command, rawCommand: command }
+      }
+    });
+  });
+
   it("keeps leading whitespace and a trailing escaped space in command details", () => {
     const command = "  printf '%s' fixture\\ ";
     const [event] = applyAll(gemini(), [
