@@ -9,23 +9,49 @@ export function isGenericShellToolTitle(label: string): boolean {
 }
 
 export function isCommandLabelFallback(label: string, command: string): boolean {
-  return isGenericLabel(label) ||
-    isGenericShellToolTitle(label) ||
-    normalizeCommandText(label) === normalizeCommandText(command);
+  if (isGenericLabel(label) || isGenericShellToolTitle(label)) return true;
+  const title = oneLine(readCommandLabelText(label).display);
+  const { display, scriptEcho } = readCommandLabelText(command);
+  return title === oneLine(display) ||
+    (scriptEcho !== undefined && title === oneLine(scriptEcho));
 }
 
-/** Unwrap POSIX and Windows interpreter invocations for display. */
-function unwrapCommandText(command: string): string {
+function readPosixScriptWord(text: string): { length: number; display: string; echo: string } {
+  let length = 0;
+  let display = "";
+  let echo = "";
+  // Sticky matching stops at the first shell word boundary. Adjacent quoted
+  // or escaped fragments belong to that same word.
+  for (const [fragment, single, double, escaped] of text.matchAll(
+    /'([^']*)'|"((?:[^"\\]|\\[\s\S])*)"|\\([\s\S])|[^\s'"\\;&|<>()]+/gy
+  )) {
+    const literal = single ?? (escaped === "\n" ? "" : escaped);
+    display += literal ?? double ?? fragment;
+    // Keep escapes within double quotes for display. The agent can echo the
+    // script with the enclosing shell's escaping already removed.
+    const doubleEcho = double?.replace(
+      /\\(["\\$`\n])/g,
+      (_, char: string) => char === "\n" ? "" : char
+    );
+    echo += literal ?? doubleEcho ?? fragment;
+    length += fragment.length;
+  }
+  return { length, display, echo };
+}
+
+/** Derive a label and the script text an agent may echo as its title. */
+function readCommandLabelText(command: string): { display: string; scriptEcho?: string } {
   const trimmed = command.trim();
-  const posixWrapper = /^(?:\/\S+\/)?(?:ba|z)?sh\s+-l?c\s+/.exec(trimmed);
+  const posixWrapper = /^(?:\/\S+\/)?(?:ba|z)?sh\s+(-l?c|-C)\s+/.exec(trimmed);
   if (posixWrapper) {
-    const script = trimmed.slice(posixWrapper[0].length);
-    // A quoted script can be followed by positional arguments. Keep the
-    // invocation when those arguments are present or the script is blank.
-    const quotedScript = /^(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*")/.exec(script)?.[0];
-    if (quotedScript === undefined) return script;
-    const body = quotedScript.slice(1, -1);
-    return quotedScript.length === script.length && body.trim() ? body : trimmed;
+    const tail = trimmed.slice(posixWrapper[0].length);
+    const word = readPosixScriptWord(tail);
+    let display = trimmed;
+    if (posixWrapper[1] !== "-C") {
+      if (!/^['"]/.test(tail)) display = tail;
+      else if (word.length === tail.length && word.display.trim()) display = word.display;
+    }
+    return { display, scriptEcho: word.echo };
   }
 
   const unwrapped = trimmed
@@ -34,17 +60,18 @@ function unwrapCommandText(command: string): string {
       ""
     )
     .trim();
-  return unwrapped === trimmed
+  const display = unwrapped === trimmed
     ? unwrapped
     : unwrapped.replace(/^(['"])([\s\S]*)\1$/, "$2");
+  return { display };
 }
 
-function normalizeCommandText(command: string): string {
-  return unwrapCommandText(command).replace(/\s+/g, " ").trim();
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 export function formatCommandLabel(command: string): string {
-  const collapsed = normalizeCommandText(command);
+  const collapsed = oneLine(readCommandLabelText(command).display);
   if (!collapsed) {
     return "Ran command";
   }
