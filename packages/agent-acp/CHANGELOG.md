@@ -1,5 +1,12 @@
 # @pwrdrvr/agent-acp
 
+## 0.17.3
+
+### Patch Changes
+
+- 60b7a2a: Decode outer shell escapes when a POSIX script word joins quoted fragments,
+  and preserve the full invocation when it uses Bash ANSI-C or locale quoting.
+
 ## 0.17.2
 
 ### Patch Changes
