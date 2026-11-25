@@ -16,27 +16,39 @@ export function isCommandLabelFallback(label: string, command: string): boolean 
     (scriptEcho !== undefined && title === oneLine(scriptEcho));
 }
 
-function readPosixScriptWord(text: string): { length: number; display: string; echo: string } {
+function readPosixScriptWord(text: string): { length: number; display: string; echo: string } | undefined {
   let length = 0;
-  let display = "";
   let echo = "";
   // Sticky matching stops at the first shell word boundary. Adjacent quoted
   // or escaped fragments belong to that same word.
   for (const [fragment, single, double, escaped] of text.matchAll(
     /'([^']*)'|"((?:[^"\\]|\\[\s\S])*)"|\\([\s\S])|[^\s'"\\;&|<>()]+/gy
   )) {
+    const end = length + fragment.length;
     const literal = single ?? (escaped === "\n" ? "" : escaped);
-    display += literal ?? double ?? fragment;
-    // Keep escapes within double quotes for display. The agent can echo the
-    // script with the enclosing shell's escaping already removed.
+    // An unquoted dollar immediately before a quote introduces Bash-specific quoting.
+    if (
+      literal === undefined &&
+      double === undefined &&
+      fragment.endsWith("$") &&
+      /['"]/.test(text.charAt(end))
+    ) {
+      return undefined;
+    }
     const doubleEcho = double?.replace(
       /\\(["\\$`\n])/g,
       (_, char: string) => char === "\n" ? "" : char
     );
-    echo += literal ?? doubleEcho ?? fragment;
-    length += fragment.length;
+    const decoded = literal ?? doubleEcho ?? fragment;
+    // Preserve the display for a standalone double-quoted script. Joined
+    // fragments display the decoded word the shell passes to -c.
+    if (double !== undefined && fragment.length === text.length) {
+      return { length: end, display: double, echo: decoded };
+    }
+    echo += decoded;
+    length = end;
   }
-  return { length, display, echo };
+  return { length, display: echo, echo };
 }
 
 /** Derive a label and the script text an agent may echo as its title. */
@@ -46,12 +58,13 @@ function readCommandLabelText(command: string): { display: string; scriptEcho?: 
   if (posixWrapper) {
     const tail = trimmed.slice(posixWrapper[0].length);
     const word = readPosixScriptWord(tail);
+    if (word === undefined) return { display: trimmed };
     let display = trimmed;
     if (posixWrapper[1] !== "-C") {
       if (!/^['"]/.test(tail)) display = tail;
       else if (word.length === tail.length && word.display.trim()) display = word.display;
     }
-    return { display, scriptEcho: word.echo };
+    return word.length > 0 ? { display, scriptEcho: word.echo } : { display };
   }
 
   const unwrapped = trimmed
