@@ -1,5 +1,12 @@
 # @pwrdrvr/agent-acp
 
+## 0.17.2
+
+### Patch Changes
+
+- 0ab2900: Keep the POSIX shell invocation in a command label when a quoted script has
+  trailing arguments, the script is blank, or the flag is uppercase.
+
 ## 0.17.1
 
 ### Patch Changes
