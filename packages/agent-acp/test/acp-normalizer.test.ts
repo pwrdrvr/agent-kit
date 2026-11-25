@@ -269,6 +269,48 @@ describe("AcpSessionNormalizer — tool calls", () => {
   });
 
   it.each([
+    { prefix: "'echo one'$", quoted: "'\\n''echo two'" },
+    { prefix: "'echo '$", quoted: '"translated"' }
+  ])("keeps Bash quoting split by an unquoted line continuation: $quoted", ({ prefix, quoted }) => {
+    const command = "bash -c " + prefix + "\\\n" + quoted;
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: {
+        label: "bash -c " + prefix + "\\ " + quoted,
+        command: { displayCommand: command, rawCommand: command }
+      }
+    });
+  });
+
+  it.each(['printf %s "a b"', 'printf %s \\"a b\\"'])(
+    "keeps the summary when a completion echoes %s",
+    (title) => {
+      const command = "bash -c 'printf %s '\"\\\"a b\\\"\"";
+      const events = applyAll(gemini(), [
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "command",
+          kind: "execute",
+          title: "Bash",
+          rawInput: { command, toolSummary: "Print the fixture" }
+        },
+        { sessionUpdate: "tool_call_update", toolCallId: "command", title, status: "completed" }
+      ]);
+
+      expect(events[1]).toMatchObject({
+        toolCall: {
+          label: "Print the fixture",
+          status: "completed",
+          command: { displayCommand: command, rawCommand: command }
+        }
+      });
+    }
+  );
+
+  it.each([
     { command: "/bin/bash -C ./build.sh", title: "./build.sh" },
     { command: 'bash -c "echo \\"$1\\"" _ "hello"', title: 'echo "$1"' }
   ])("retains the invocation when the title echoes $title", ({ command, title }) => {
