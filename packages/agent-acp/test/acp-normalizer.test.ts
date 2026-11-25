@@ -223,6 +223,84 @@ describe("AcpSessionNormalizer — tool calls", () => {
     });
   });
 
+  it.each([
+    { command: "bash -c 'echo \"$1\"' _ 'hello'" },
+    { command: 'bash -c "echo $1" _ "hello"' },
+    { command: "/bin/bash -C ./build.sh" },
+    { command: '/bin/bash -c ""' },
+    { command: "/bin/bash -c ' \t '", label: "/bin/bash -c ' '" }
+  ])("keeps the invocation in the label for $command", ({ command, label = command }) => {
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: { label, command: { displayCommand: command, rawCommand: command } }
+    });
+  });
+
+  it("shows one line for a double-quoted script with escaped quotes", () => {
+    const command = '/bin/bash -c "echo \\"first\\"\necho second"';
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: {
+        label: 'echo \\"first\\" echo second',
+        command: { displayCommand: command, rawCommand: command }
+      }
+    });
+  });
+
+  it.each([
+    { command: "/bin/bash -C ./build.sh", title: "./build.sh" },
+    { command: 'bash -c "echo \\"$1\\"" _ "hello"', title: 'echo "$1"' }
+  ])("retains the invocation when the title echoes $title", ({ command, title }) => {
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title, command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: { label: command, command: { displayCommand: command, rawCommand: command } }
+    });
+  });
+
+  it("bounds a script echo on completion using the invocation label", () => {
+    const script = "echo " + "a".repeat(80);
+    const command = "bash -c '" + script + "' _ 'hello'";
+    const events = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command },
+      { sessionUpdate: "tool_call_update", toolCallId: "command", title: script, status: "completed" }
+    ]);
+
+    for (const event of events) {
+      expect(event).toMatchObject({
+        toolCall: {
+          label: command.slice(0, 69) + "...",
+          command: { displayCommand: command, rawCommand: command }
+        }
+      });
+    }
+  });
+
+  it.each([
+    { trailingArgs: "", label: "printf \"%s\\n\" 'hello'" },
+    { trailingArgs: " _ 'arg'" }
+  ])("handles adjacent quote fragments with trailing text '$trailingArgs'", ({ trailingArgs, label }) => {
+    const command = "bash -c 'printf \"%s\\n\" '\\''hello'\\'''" + trailingArgs;
+    const [event] = applyAll(gemini(), [
+      { sessionUpdate: "tool_call", toolCallId: "command", kind: "execute", title: "Bash", command }
+    ]);
+
+    expect(event).toMatchObject({
+      toolCall: {
+        label: label ?? command,
+        command: { displayCommand: command, rawCommand: command }
+      }
+    });
+  });
+
   it("keeps leading whitespace and a trailing escaped space in command details", () => {
     const command = "  printf '%s' fixture\\ ";
     const [event] = applyAll(gemini(), [
